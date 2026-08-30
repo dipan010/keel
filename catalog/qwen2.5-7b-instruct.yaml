@@ -1,0 +1,15 @@
+# Adding a model is a pull request with an approval. That is the governance
+# story told in a form engineers will actually follow.
+id: qwen2.5-7b-instruct
+mode: self_hosted
+default_lane: b
+weights_uri: s3://keel-models/qwen2.5-7b-instruct
+accelerator: l4
+gpu_count: 1
+context_length: 32768
+quantization: null
+license: apache-2.0          # verified before status: validated
+status: preview
+engine_args:
+  max-model-len: 32768
+  gpu-memory-utilization: 0.90
