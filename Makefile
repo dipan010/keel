@@ -17,8 +17,17 @@ migrate:      ## apply migrations in order
 		docker exec -i keel-db psql -U keel -d keel < $$f; \
 	done
 
-api:          ## run the control api
-	uv run uvicorn control.api.main:app --reload --port 8080
+catalog:      ## sync catalog/*.yaml into the database
+	uv run python -m control.catalog_sync
+
+seed:         ## create a development team
+	docker exec -i keel-db psql -q -U keel -d keel -c \
+	  "insert into teams (id, slug, oidc_group, gpu_quota, budget_usd_mo) \
+	   values (gen_random_uuid(), 'platform', 'keel-dev', 2, 500) \
+	   on conflict (slug) do nothing;"
+
+api:          ## run the control api (KEEL_DEV_AUTH=1 bypasses OIDC)
+	KEEL_DEV_AUTH=1 uv run uvicorn control.api.main:app --reload --port 8080
 
 provisioner:  ## run the queue worker
 	uv run python -m control.provisioner.main

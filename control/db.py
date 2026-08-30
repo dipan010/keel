@@ -1,11 +1,10 @@
-"""Connection pool and the queue primitives.
-
-The queue lives in Postgres rather than a broker. See ADR-0005.
-"""
+"""Connection pool. The queue primitives live in repo.py."""
 
 from __future__ import annotations
 
 import os
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
 from psycopg.rows import dict_row
@@ -21,6 +20,25 @@ def pool() -> AsyncConnectionPool:
     if _pool is None:
         _pool = AsyncConnectionPool(DSN, kwargs={"row_factory": dict_row}, open=False)
     return _pool
+
+
+async def open_pool() -> None:
+    await pool().open(wait=True, timeout=10)
+
+
+async def close_pool() -> None:
+    global _pool
+    if _pool is not None:
+        await _pool.close()
+        _pool = None
+
+
+@asynccontextmanager
+async def transaction() -> AsyncIterator[Any]:
+    """One connection, one transaction. Commits on clean exit, rolls back on any
+    exception -- which is what makes insert-plus-enqueue atomic."""
+    async with pool().connection() as conn, conn.transaction():
+        yield conn
 
 
 CLAIM_JOB = """
@@ -43,27 +61,3 @@ async def claim_job(conn: Any) -> dict[str, Any] | None:
     reclaimed, so there are no dead letters to manage."""
     cur = await conn.execute(CLAIM_JOB)
     return await cur.fetchone()
-
-
-async def record_transition(
-    conn: Any,
-    deployment_id: str,
-    frm: str | None,
-    to: str,
-    actor: str,
-    reason_code: str | None = None,
-    detail: dict[str, Any] | None = None,
-) -> None:
-    """Status is a projection of the event log, never a field somebody sets."""
-    import json
-
-    await conn.execute(
-        "update deployments set status = %s, updated_at = now() where id = %s",
-        (to, deployment_id),
-    )
-    await conn.execute(
-        """insert into deployment_events
-             (deployment_id, from_status, to_status, actor, reason_code, detail)
-           values (%s, %s, %s, %s, %s, %s)""",
-        (deployment_id, frm, to, actor, reason_code, json.dumps(detail) if detail else None),
-    )

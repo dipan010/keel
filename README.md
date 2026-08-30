@@ -45,9 +45,21 @@ docs/baseline.md   ** fill this in before writing provisioning code **
 make dev        # deps into .venv
 make db         # postgres in docker
 make migrate    # apply schema
-make test       # unit tests, no cluster and no GPU needed
+make catalog    # sync catalog/*.yaml into the database
+make seed       # create the 'platform' dev team
+make test       # unit + integration
 make api        # control api on :8080
 ```
+
+```bash
+curl -X POST localhost:8080/v1/deployments \
+  -H "Idempotency-Key: $(uuidgen)" -H 'Content-Type: application/json' \
+  -d '{"team":"platform","name":"chat",
+       "model":"qwen2.5-0.5b-instruct","allow_preview":true}'
+```
+
+Unit tests need nothing. Integration tests skip cleanly without a migrated
+database, so `make test` works on a laptop with nothing running.
 
 `make cluster` brings up a local k3d cluster and `make fake` builds a fake vLLM
 that answers the OpenAI API with canned responses and plausible metrics. That
