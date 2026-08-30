@@ -1,5 +1,11 @@
 # Adding a model is a pull request with an approval. That is the governance
 # story told in a form engineers will actually follow.
+#
+# This one exists for the docs/baseline.md measurement, not for daily work.
+# Weight-load time dominates time-to-ready, so baselining on the 0.5B fixture
+# would produce a real number that teaches you nothing about whether the
+# node-local weights cache (ADR-0004) is worth having. Run this once, record
+# the cold and warm timings, then go back to the 0.5B.
 id: qwen2.5-7b-instruct
 mode: self_hosted
 default_lane: b

@@ -1,0 +1,23 @@
+# The development fixture. Small on purpose.
+#
+# Phase 1 is testing the control path, not the model -- so the right model is
+# the one with the shortest request -> ready -> callable loop. ~1GB of weights
+# at fp16: pulls in seconds, loads in seconds, fits on the cheapest GPU any
+# provider rents (T4, L4), and is small enough that vLLM's CPU backend is a
+# realistic option for integration tests with no GPU at all.
+#
+# Apache-2.0 deliberately: the dev fixture should never be the thing that makes
+# someone read a licence. See catalog/README.md.
+id: qwen2.5-0.5b-instruct
+mode: self_hosted
+default_lane: b
+weights_uri: s3://keel-models/qwen2.5-0.5b-instruct
+accelerator: l4
+gpu_count: 1
+context_length: 32768
+quantization: null
+license: apache-2.0
+status: preview
+engine_args:
+  max-model-len: 8192          # well under the 32k ceiling; nothing here needs it
+  gpu-memory-utilization: 0.60 # leaves room to co-schedule while developing

@@ -14,11 +14,17 @@ thing that has to beat it.
 
 ## Procedure
 
-Deploy one small model manually onto a GPU node -- `kubectl`, a vLLM container,
-a Service, and whatever it takes to actually call it from outside. Time it end
-to end, from "I want this model" to "curl returns a completion".
+Deploy one model manually onto a GPU node -- `kubectl`, a vLLM container, a
+Service, and whatever it takes to actually call it from outside. Time it end to
+end, from "I want this model" to "curl returns a completion".
 
 Do it twice: once cold (no cached weights) and once warm.
+
+**Use the 7B for this, not the 0.5B fixture.** Weight-load time is the dominant
+term in time-to-ready, so a 0.5B produces a real number that tells you nothing
+about whether the node-local cache (ADR-0004) earns its keep. Measure once on
+something realistic, then develop against `qwen2.5-0.5b-instruct` -- which pulls
+and loads in seconds, and is what makes the loop fast enough to actually run.
 
 ## What to record
 

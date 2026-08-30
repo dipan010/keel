@@ -76,5 +76,7 @@ Things a code review should reject a change for violating.
 
 ## Phase 1
 
-In: one small model on one GPU, lane B, end to end.
+In: one model on one GPU, lane B, end to end. Develop against
+`qwen2.5-0.5b-instruct` (~1GB, seconds to load); reserve the 7B for the
+`docs/baseline.md` timing run.
 Out: UI, lane A, lane C, autoscaling, the reconciler, the estimator, Azure.
