@@ -52,6 +52,10 @@ cluster:      ## local k3d cluster, no gpu
 cluster-rm:   ## tear the local cluster down
 	k3d cluster delete keel
 
+rbac:         ## service accounts and roles that enforce I4 and I5
+	kubectl apply -f deploy/kind/namespaces.yaml
+	kubectl apply -f deploy/rbac.yaml
+
 gateway:      ## deploy litellm + its own database into the cluster
 	kubectl apply -f deploy/kind/namespaces.yaml
 	kubectl apply -f deploy/gateway/

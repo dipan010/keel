@@ -63,6 +63,7 @@ database, so `make test` works on a laptop with nothing running.
 
 ```bash
 make cluster     # local k3d cluster
+make rbac        # service accounts and roles
 make gateway     # litellm + its own database
 make fake        # build the fake vLLM and load it in
 make gateway-fwd # port-forward :4000, in another shell
@@ -100,6 +101,8 @@ Things a code review should reject a change for violating.
 3. The database is desired state; the cluster is actual state.
 4. Nothing is created outside `keel-inf-*` and `keel-gateway`.
 5. Orphaned objects are alerted on, never auto-deleted.
+   (1, 4 and 5 are enforced by the API server, not by convention --
+   `deploy/rbac.yaml`, asserted in `control/tests/test_rbac.py`.)
 6. Every state transition writes an event. Status is a projection of that log.
 
 ## Phase 1

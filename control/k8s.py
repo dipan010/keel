@@ -23,6 +23,7 @@ RESOURCES: dict[str, tuple[str, str, str]] = {
     "Namespace": ("", "v1", "namespaces"),
     "ResourceQuota": ("", "v1", "resourcequotas"),
     "NetworkPolicy": ("networking.k8s.io", "v1", "networkpolicies"),
+    "RoleBinding": ("rbac.authorization.k8s.io", "v1", "rolebindings"),
     "Service": ("", "v1", "services"),
     "Deployment": ("apps", "v1", "deployments"),
     "ScaledObject": ("keda.sh", "v1alpha1", "scaledobjects"),

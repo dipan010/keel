@@ -13,6 +13,8 @@ from control.domain.rules import namespace
 from control.render.manifests import LABEL_MANAGED, LABEL_TEAM, MANAGED_BY
 
 GATEWAY_NS = "keel-gateway"
+CONTROL_NS = "keel-system"
+PROVISIONER_SA = "keel-provisioner"
 
 
 def render(team_slug: str, gpu_quota: int) -> list[dict[str, Any]]:
@@ -25,6 +27,24 @@ def render(team_slug: str, gpu_quota: int) -> list[dict[str, Any]]:
             "kind": "ResourceQuota",
             "metadata": {"name": "keel-quota", "namespace": ns, "labels": lb},
             "spec": {"hard": {"requests.nvidia.com/gpu": str(gpu_quota)}},
+        },
+        {
+            # The Provisioner's write permission is granted per namespace, here,
+            # at onboarding. There is deliberately no ClusterRoleBinding for it:
+            # that is what keeps invariant I4 ("nothing is created outside
+            # keel-inf-*") enforced by the API server rather than by our code
+            # remembering to scope its own writes.
+            "apiVersion": "rbac.authorization.k8s.io/v1",
+            "kind": "RoleBinding",
+            "metadata": {"name": "keel-provisioner", "namespace": ns, "labels": lb},
+            "roleRef": {
+                "apiGroup": "rbac.authorization.k8s.io",
+                "kind": "ClusterRole",
+                "name": PROVISIONER_SA,
+            },
+            "subjects": [
+                {"kind": "ServiceAccount", "name": PROVISIONER_SA, "namespace": CONTROL_NS}
+            ],
         },
         {
             "apiVersion": "networking.k8s.io/v1",

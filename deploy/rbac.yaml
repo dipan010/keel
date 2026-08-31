@@ -1,0 +1,89 @@
+# The permissions that make the invariants structural rather than conventional.
+#
+# I4  Nothing is created outside keel-inf-* and keel-gateway.
+# I5  Orphans are alerted on, never deleted.
+#
+# Both are enforced here by the API server, not by discipline in code review.
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: keel-api, namespace: keel-system}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: keel-provisioner, namespace: keel-system}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: keel-reconciler, namespace: keel-system}
+---
+# keel-api gets NO cluster permissions at all. It reads and writes Postgres and
+# nothing else; provisioning is the Provisioner's job alone. The absence of a
+# RoleBinding here is deliberate -- do not add one "just for a status check".
+---
+# The Reconciler: get/list/watch, cluster-wide, and nothing more. It needs to
+# see every namespace to spot orphans, and it must not be able to act on what
+# it finds. Auto-deletion on a bad label selector is how a platform destroys a
+# team's production endpoint.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: keel-reconciler}
+rules:
+  - apiGroups: [""]
+    resources: [pods, pods/log, services, namespaces, resourcequotas]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: [keda.sh]
+    resources: [scaledobjects]
+    verbs: [get, list, watch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: keel-reconciler}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: keel-reconciler}
+subjects: [{kind: ServiceAccount, name: keel-reconciler, namespace: keel-system}]
+---
+# The Provisioner holds the write permission -- but only over namespaces it
+# owns, granted per-namespace by a RoleBinding created at team onboarding.
+# There is deliberately no ClusterRoleBinding: a bug cannot reach keel-system
+# or anything outside our namespaces.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: keel-provisioner}
+rules:
+  - apiGroups: [""]
+    resources: [services, persistentvolumeclaims, configmaps]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [""]
+    resources: [pods, pods/log]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [keda.sh]
+    resources: [scaledobjects]
+    verbs: [get, list, watch, create, update, patch, delete]
+  - apiGroups: [networking.k8s.io]
+    resources: [networkpolicies]
+    verbs: [get, list, watch, create, update, patch]
+---
+# Namespace creation and quota are cluster-scoped, so they are granted
+# separately and narrowly.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: keel-provisioner-namespaces}
+rules:
+  - apiGroups: [""]
+    resources: [namespaces]
+    verbs: [get, list, watch, create, patch]
+  - apiGroups: [""]
+    resources: [resourcequotas]
+    verbs: [get, list, watch, create, update, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: keel-provisioner-namespaces}
+roleRef:
+  {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: keel-provisioner-namespaces}
+subjects: [{kind: ServiceAccount, name: keel-provisioner, namespace: keel-system}]
