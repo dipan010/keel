@@ -35,19 +35,30 @@ requires_db = pytest.mark.skipif(
 )
 
 
+@pytest_asyncio.fixture(autouse=True)
+async def _pool():
+    """One pool for the whole test, opened once.
+
+    Fixtures used to open and close it individually, so whichever tore down
+    first closed it out from under the others.
+    """
+    from control import db
+
+    await db.open_pool()
+    yield
+    await db.close_pool()
+
+
 @pytest_asyncio.fixture
 async def client():
     import httpx
     from httpx import ASGITransport
 
-    from control import db
     from control.api.main import app
 
-    await db.open_pool()
     transport = ASGITransport(app=app)
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as c:
         yield c
-    await db.close_pool()
 
 
 @pytest_asyncio.fixture
@@ -57,7 +68,6 @@ async def team():
     from control import db
 
     slug = f"t{uuid.uuid4().hex[:10]}"
-    await db.open_pool()
     async with db.transaction() as conn:
         await conn.execute(
             """insert into teams (id, slug, oidc_group, gpu_quota)
@@ -83,4 +93,3 @@ async def team():
             (slug,),
         )
         await conn.execute("delete from teams where slug = %s", (slug,))
-    await db.close_pool()

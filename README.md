@@ -62,8 +62,10 @@ Unit tests need nothing. Integration tests skip cleanly without a migrated
 database, so `make test` works on a laptop with nothing running.
 
 ```bash
-make cluster    # local k3d cluster
-make fake       # build the fake vLLM and load it in
+make cluster     # local k3d cluster
+make gateway     # litellm + its own database
+make fake        # build the fake vLLM and load it in
+make gateway-fwd # port-forward :4000, in another shell
 make provisioner
 ```
 
@@ -74,8 +76,11 @@ seconds so the `scheduling -> loading -> ready` path is real. Combined with
 GPU -- without which every integration test costs GPU-hours and nobody runs
 them.
 
-Three test tiers: `test-unit` needs nothing, the database suite skips without
-Postgres, and the cluster suite skips without a reachable API server.
+Four test tiers, each skipping cleanly when its dependency is absent:
+`test-unit` needs nothing, the database suite needs Postgres, the cluster suite
+needs an API server, and `test_full_pipeline.py` needs all three plus a gateway
+port-forward. That last one is the phase 1 acceptance test: one request in, one
+working endpoint out, verified by a real completion.
 
 ## The bar
 

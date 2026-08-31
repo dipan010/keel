@@ -1,0 +1,46 @@
+# The gateway's OWN database, deliberately separate from the control plane's.
+#
+# Invariant I2 forbids the gateway making synchronous calls to the CONTROL
+# PLANE or its database to serve a request. Its own store is a different thing:
+# LiteLLM loads the model list into memory and serves from there, so a control
+# plane outage -- or a keel-db restart -- cannot touch inference.
+#
+# In production this is a managed instance, not a pod with an emptyDir.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gateway-db
+  namespace: keel-gateway
+  labels: {app.kubernetes.io/managed-by: keel, app: gateway-db}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: gateway-db}}
+  template:
+    metadata:
+      labels: {app: gateway-db, app.kubernetes.io/managed-by: keel}
+    spec:
+      containers:
+        - name: postgres
+          image: postgres:17-alpine
+          env:
+            - {name: POSTGRES_USER, value: litellm}
+            - {name: POSTGRES_PASSWORD, value: litellm}
+            - {name: POSTGRES_DB, value: litellm}
+            - {name: PGDATA, value: /var/lib/postgresql/data/pgdata}
+          ports: [{containerPort: 5432}]
+          volumeMounts: [{name: data, mountPath: /var/lib/postgresql/data}]
+          readinessProbe:
+            exec: {command: [pg_isready, -U, litellm]}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+      volumes: [{name: data, emptyDir: {}}]
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gateway-db
+  namespace: keel-gateway
+  labels: {app.kubernetes.io/managed-by: keel}
+spec:
+  selector: {app: gateway-db}
+  ports: [{port: 5432, targetPort: 5432}]

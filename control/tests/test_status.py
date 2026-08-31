@@ -78,8 +78,12 @@ def test_oom_is_caught_from_last_state_after_restart():
 def test_unschedulable_is_tolerated_briefly():
     p = pod(
         conditions=[
-            {"type": "PodScheduled", "status": "False", "reason": "Unschedulable",
-             "message": "0/2 nodes match keel.io/accelerator=a100-80g"}
+            {
+                "type": "PodScheduled",
+                "status": "False",
+                "reason": "Unschedulable",
+                "message": "0/2 nodes match keel.io/accelerator=a100-80g",
+            }
         ]
     )
     # Transient: a node may be draining, another pod terminating.

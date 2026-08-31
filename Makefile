@@ -52,6 +52,14 @@ cluster:      ## local k3d cluster, no gpu
 cluster-rm:   ## tear the local cluster down
 	k3d cluster delete keel
 
+gateway:      ## deploy litellm + its own database into the cluster
+	kubectl apply -f deploy/kind/namespaces.yaml
+	kubectl apply -f deploy/gateway/
+	kubectl rollout status deploy/litellm -n keel-gateway --timeout=300s
+
+gateway-fwd:  ## port-forward the gateway to localhost:4000
+	kubectl port-forward -n keel-gateway svc/litellm 4000:4000
+
 fake:         ## build the fake vllm runtime and load it into the cluster
 	docker build -t keel/fake-runtime:dev bench/fake-runtime
 	k3d image import keel/fake-runtime:dev -c keel

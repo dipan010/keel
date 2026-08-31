@@ -1,0 +1,58 @@
+# LiteLLM Proxy -- adopted, not authored. See ADR-0003.
+#
+# This is the ONLY component of ours in the inference request path, and the only
+# thing in the cluster with an Ingress. Every vLLM Service stays ClusterIP.
+apiVersion: v1
+kind: Secret
+metadata:
+  name: litellm-secrets
+  namespace: keel-gateway
+type: Opaque
+stringData:
+  # Dev value. In production this comes from a real secret store, and the
+  # Provisioner reads it to authenticate its admin calls.
+  master-key: sk-keel-dev-master
+  database-url: postgresql://litellm:litellm@gateway-db.keel-gateway.svc.cluster.local:5432/litellm
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: litellm
+  namespace: keel-gateway
+  labels: {app.kubernetes.io/managed-by: keel, app: litellm}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: litellm}}
+  template:
+    metadata:
+      labels: {app: litellm, app.kubernetes.io/managed-by: keel}
+    spec:
+      containers:
+        - name: litellm
+          # TODO: pin to a release tag before this leaves development.
+          image: ghcr.io/berriai/litellm-database:main-stable
+          args: ["--port", "4000", "--num_workers", "1"]
+          env:
+            - name: LITELLM_MASTER_KEY
+              valueFrom: {secretKeyRef: {name: litellm-secrets, key: master-key}}
+            - name: DATABASE_URL
+              valueFrom: {secretKeyRef: {name: litellm-secrets, key: database-url}}
+            # Routes added at runtime by the Provisioner persist here, and are
+            # held in memory to serve requests.
+            - {name: STORE_MODEL_IN_DB, value: "True"}
+          ports: [{containerPort: 4000}]
+          readinessProbe:
+            httpGet: {path: /health/liveliness, port: 4000}
+            initialDelaySeconds: 20
+            periodSeconds: 5
+            failureThreshold: 60
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: litellm
+  namespace: keel-gateway
+  labels: {app.kubernetes.io/managed-by: keel}
+spec:
+  selector: {app: litellm}
+  ports: [{port: 4000, targetPort: 4000}]

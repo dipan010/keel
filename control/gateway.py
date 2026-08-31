@@ -54,6 +54,11 @@ class LiteLLMGateway:
         self._headers = {"Authorization": f"Bearer {key}"}
 
     async def register(self, route: str, upstream: str, model: str) -> None:
+        # hosted_vllm expects api_base to point at the OpenAI-compatible ROOT,
+        # i.e. including /v1. Handing it the bare Service URL produces a 404
+        # from upstream that looks exactly like a missing route.
+        if not upstream.rstrip("/").endswith("/v1"):
+            upstream = upstream.rstrip("/") + "/v1"
         async with httpx.AsyncClient(timeout=15) as c:
             r = await c.post(
                 f"{self._base}/model/new",
@@ -71,12 +76,25 @@ class LiteLLMGateway:
             r.raise_for_status()
 
     async def deregister(self, route: str) -> None:
+        # /model/delete keys on LiteLLM's internal model id, not on the name we
+        # registered, so this is a lookup then a delete. Deleting an absent
+        # route is a no-op: teardown has to be safe to retry.
         async with httpx.AsyncClient(timeout=15) as c:
-            r = await c.post(
-                f"{self._base}/model/delete", headers=self._headers, json={"model_name": route}
-            )
-            if r.status_code not in (200, 404):
-                r.raise_for_status()
+            info = await c.get(f"{self._base}/model/info", headers=self._headers)
+            info.raise_for_status()
+            ids = [
+                (m.get("model_info") or {}).get("id")
+                for m in info.json().get("data", [])
+                if m.get("model_name") == route
+            ]
+            for model_id in filter(None, ids):
+                r = await c.post(
+                    f"{self._base}/model/delete",
+                    headers=self._headers,
+                    json={"id": model_id},
+                )
+                if r.status_code not in (200, 404):
+                    r.raise_for_status()
 
     async def completion(self, route: str, prompt: str) -> str:
         """A real completion through the gateway -- not a readiness probe.

@@ -168,7 +168,9 @@ async def create(
         self_hosted = entry.mode is Mode.SELF_HOSTED
 
         if self_hosted:
-            gpus = entry.gpu_count or 1
+            # 0 is a real value -- CPU serving. `or 1` would turn it into a GPU
+            # request and charge quota for hardware the pod never asks for.
+            gpus = 1 if entry.gpu_count is None else entry.gpu_count
             in_use = await repo.gpu_in_use(conn, team["id"])
             if in_use + gpus > team["gpu_quota"]:
                 raise QuotaExceeded(gpus, in_use, team["gpu_quota"])
