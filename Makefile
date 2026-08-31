@@ -35,18 +35,26 @@ provisioner:  ## run the queue worker
 reconciler:   ## run the reconcile loop
 	uv run python -m control.reconciler.main
 
-test:         ## unit tests (no cluster, no gpu)
+test:         ## all tests; db and cluster suites skip if absent
 	uv run pytest -q
+
+test-unit:    ## domain only -- needs nothing at all
+	uv run pytest -q control/tests/test_states.py control/tests/test_rules.py \
+	  control/tests/test_status.py control/tests/test_no_infra_imports.py
 
 lint:
 	uv run ruff check . && uv run ruff format --check .
 
 cluster:      ## local k3d cluster, no gpu
-	k3d cluster create keel --agents 1 || true
+	k3d cluster create keel --agents 1 --wait || true
 	kubectl apply -f deploy/kind/namespaces.yaml
 
-fake:         ## build the fake vllm runtime image
+cluster-rm:   ## tear the local cluster down
+	k3d cluster delete keel
+
+fake:         ## build the fake vllm runtime and load it into the cluster
 	docker build -t keel/fake-runtime:dev bench/fake-runtime
+	k3d image import keel/fake-runtime:dev -c keel
 
 clean:
 	docker rm -f keel-db 2>/dev/null || true

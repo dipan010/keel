@@ -22,9 +22,7 @@ def key() -> str:
 
 
 async def test_create_returns_202_and_a_route(client, team):
-    r = await client.post(
-        "/v1/deployments", json=body(team), headers={"Idempotency-Key": key()}
-    )
+    r = await client.post("/v1/deployments", json=body(team), headers={"Idempotency-Key": key()})
     assert r.status_code == 202, r.text
     d = r.json()
     assert d["status"] == "requested"
@@ -125,9 +123,7 @@ async def test_create_writes_row_event_and_job_together(client, team):
             "select count(*) as n from deployment_events where deployment_id = %s", (dep_id,)
         )
         assert (await cur.fetchone())["n"] == 1
-        cur = await conn.execute(
-            "select kind from jobs where deployment_id = %s", (dep_id,)
-        )
+        cur = await conn.execute("select kind from jobs where deployment_id = %s", (dep_id,))
         # The row cannot exist without its job: same transaction.
         assert (await cur.fetchone())["kind"] == "provision"
 

@@ -7,6 +7,7 @@ doc's section 4.1 cheap to walk through later.
 
 from __future__ import annotations
 
+import os
 from typing import Any
 
 from control.domain.rules import namespace, object_name
@@ -19,8 +20,14 @@ LABEL_TEAM = "keel.io/team"
 LABEL_ACCELERATOR = "keel.io/accelerator"
 TAINT_GPU = "keel.io/gpu"
 
-VLLM_IMAGE = "vllm/vllm-openai:v0.11.0"
+#: Pinned per environment. A cluster with no GPUs (CI, a laptop) runs the
+#: fake runtime from bench/ through exactly this code path.
+VLLM_IMAGE = os.environ.get("KEEL_RUNTIME_IMAGE", "vllm/vllm-openai:v0.11.0")
+FETCHER_IMAGE = os.environ.get("KEEL_WEIGHTS_FETCHER_IMAGE", "keel/weights-fetcher:dev")
 VLLM_PORT = 8000
+#: Weight loading is slow and that is not a fault: fail readiness during it
+#: and the pod restarts forever.
+READY_DELAY_SECONDS = int(os.environ.get("KEEL_READY_DELAY", "30"))
 
 
 def labels(deployment_id: str, team: str) -> dict[str, str]:
@@ -48,6 +55,48 @@ def render(dep: dict[str, Any]) -> list[dict[str, Any]]:
     return objects
 
 
+def _placement(dep: dict[str, Any]) -> dict[str, Any]:
+    """gpu_count == 0 means CPU serving: no accelerator to select, no GPU taint
+    to tolerate. Real for small models on vLLM's CPU backend, and what lets the
+    whole control path run on a cluster with no GPUs at all."""
+    if not dep.get("gpu_count"):
+        return {}
+    return {
+        "nodeSelector": {LABEL_ACCELERATOR: dep["accelerator"]},
+        "tolerations": [{"key": TAINT_GPU, "operator": "Exists", "effect": "NoSchedule"}],
+    }
+
+
+def _resources(dep: dict[str, Any]) -> dict[str, Any]:
+    if not dep.get("gpu_count"):
+        return {}
+    return {"resources": {"limits": {"nvidia.com/gpu": dep["gpu_count"]}}}
+
+
+def _weights_fetcher(dep: dict[str, Any]) -> dict[str, Any]:
+    """Fetch weights into the node-local digest cache, or skip if already there.
+    Cold node: minutes. Warm node: seconds -- the single biggest lever on
+    time-to-ready (ADR-0004). Omitted when the image carries its own weights."""
+    if not dep.get("weights_uri"):
+        return {}
+    return {
+        "initContainers": [
+            {
+                "name": "fetch-weights",
+                "image": FETCHER_IMAGE,
+                "env": [
+                    {"name": "WEIGHTS_URI", "value": dep["weights_uri"]},
+                    {"name": "CACHE_DIR", "value": "/cache"},
+                ],
+                "volumeMounts": [
+                    {"name": "cache", "mountPath": "/cache"},
+                    {"name": "models", "mountPath": "/models"},
+                ],
+            }
+        ]
+    }
+
+
 def _deployment(dep: dict[str, Any], name: str, ns: str, lb: dict[str, str]) -> dict[str, Any]:
     args = ["--model", "/models/weights", "--port", str(VLLM_PORT)]
     for flag, value in (dep.get("engine_args") or {}).items():
@@ -64,40 +113,19 @@ def _deployment(dep: dict[str, Any], name: str, ns: str, lb: dict[str, str]) -> 
             "template": {
                 "metadata": {"labels": lb},
                 "spec": {
-                    "nodeSelector": {LABEL_ACCELERATOR: dep["accelerator"]},
-                    "tolerations": [
-                        {"key": TAINT_GPU, "operator": "Exists", "effect": "NoSchedule"}
-                    ],
-                    # Fetch weights into the node-local digest cache, or skip if
-                    # already there. Cold node: minutes. Warm node: seconds.
-                    # This is the single biggest lever on time-to-ready.
-                    "initContainers": [
-                        {
-                            "name": "fetch-weights",
-                            "image": "keel/weights-fetcher:dev",
-                            "env": [
-                                {"name": "WEIGHTS_URI", "value": dep["weights_uri"]},
-                                {"name": "CACHE_DIR", "value": "/cache"},
-                            ],
-                            "volumeMounts": [
-                                {"name": "cache", "mountPath": "/cache"},
-                                {"name": "models", "mountPath": "/models"},
-                            ],
-                        }
-                    ],
+                    **_placement(dep),
+                    **_weights_fetcher(dep),
                     "containers": [
                         {
                             "name": "vllm",
                             "image": dep.get("image") or VLLM_IMAGE,
                             "args": args,
                             "ports": [{"containerPort": VLLM_PORT}],
-                            "resources": {"limits": {"nvidia.com/gpu": dep.get("gpu_count", 1)}},
+                            **_resources(dep),
                             "volumeMounts": [{"name": "models", "mountPath": "/models"}],
                             "readinessProbe": {
                                 "httpGet": {"path": "/health", "port": VLLM_PORT},
-                                # Weight loading is slow and that is not a fault.
-                                # Fail here and the pod restarts forever.
-                                "initialDelaySeconds": 30,
+                                "initialDelaySeconds": READY_DELAY_SECONDS,
                                 "periodSeconds": 10,
                                 "failureThreshold": 90,
                             },

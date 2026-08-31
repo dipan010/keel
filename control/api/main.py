@@ -162,9 +162,7 @@ async def create(
             raise HTTPException(400, str(exc)) from exc
 
         if await repo.name_taken(conn, team["id"], body.name):
-            raise Conflict(
-                f"team {body.team} already has a deployment named {body.name!r}"
-            )
+            raise Conflict(f"team {body.team} already has a deployment named {body.name!r}")
 
         dep_id = uuid.uuid4()
         self_hosted = entry.mode is Mode.SELF_HOSTED

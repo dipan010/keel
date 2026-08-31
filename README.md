@@ -61,10 +61,21 @@ curl -X POST localhost:8080/v1/deployments \
 Unit tests need nothing. Integration tests skip cleanly without a migrated
 database, so `make test` works on a laptop with nothing running.
 
-`make cluster` brings up a local k3d cluster and `make fake` builds a fake vLLM
-that answers the OpenAI API with canned responses and plausible metrics. That
-pair makes the whole control path testable in CI without a GPU -- without it
-every integration test costs GPU-hours and nobody runs them.
+```bash
+make cluster    # local k3d cluster
+make fake       # build the fake vLLM and load it in
+make provisioner
+```
+
+`make fake` builds a stand-in for vLLM that answers the OpenAI API with canned
+responses and plausible metrics, and reports 503 on `/health` for its first
+seconds so the `scheduling -> loading -> ready` path is real. Combined with
+`gpu_count: 0` (CPU serving), the entire control path runs on a cluster with no
+GPU -- without which every integration test costs GPU-hours and nobody runs
+them.
+
+Three test tiers: `test-unit` needs nothing, the database suite skips without
+Postgres, and the cluster suite skips without a reachable API server.
 
 ## The bar
 

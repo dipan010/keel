@@ -55,8 +55,13 @@ def load() -> list[dict]:
             raise SystemExit(f"{path.name}: missing required field(s) {missing}")
         raw.setdefault("engine_args", {})
         raw["engine_args"] = json.dumps(raw["engine_args"])
-        for optional in ("weights_uri", "accelerator", "gpu_count", "quantization",
-                         "upstream_model"):
+        for optional in (
+            "weights_uri",
+            "accelerator",
+            "gpu_count",
+            "quantization",
+            "upstream_model",
+        ):
             raw.setdefault(optional, None)
         entries.append(raw)
     return entries
