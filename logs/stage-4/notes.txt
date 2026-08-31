@@ -1,0 +1,139 @@
+================================================================================
+STAGE 4 -- GATEWAY WIRING
+commit 49b8180
+================================================================================
+
+WHAT THIS STAGE PRODUCES
+    The chain runs end to end for real: request -> record -> manifests -> pod
+    -> gateway -> a completion. This is the stage where the platform first does
+    the thing it exists to do.
+
+--------------------------------------------------------------------------------
+STEPS
+--------------------------------------------------------------------------------
+ 1. deploy/gateway/ -- LiteLLM plus its own Postgres, into keel-gateway.
+ 2. Wired LiteLLMGateway to the real service; registered a route by hand first.
+ 3. Fixed what that exposed (three bugs, below).
+ 4. control/tests/test_full_pipeline.py -- the phase 1 acceptance test.
+ 5. Migration 0003 -- relaxed a constraint that contradicted ADR-0004.
+
+--------------------------------------------------------------------------------
+CONCEPT 1 -- DIALECT NORMALIZATION IS THE PRODUCT
+--------------------------------------------------------------------------------
+CONCEPT
+    §2.2. vLLM wants /v1/chat/completions with the model named in the body.
+    Azure OpenAI wants the deployment in the URL path and an api-version query
+    param. Anthropic wants /v1/messages with a different body shape entirely.
+
+    Reconciling those into ONE surface is the single most valuable thing the
+    platform does for a developer. It is what makes "use it wherever you need"
+    true, and what turns a model swap -- 70B to 7B, self-hosted to upstream,
+    one provider to another -- into a config change that touches NO client code.
+
+IN THE CODE
+    control/gateway.py            register() writes the route
+    control/domain/rules.py:96    route_name() -- "{team}/{name}"
+
+PROVEN
+    In test_full_pipeline.py the client posts model="{team}/chat" and gets a
+    completion. It never learns the backend calls itself "/models/weights".
+    That gap between what the client says and what the backend is called IS the
+    abstraction.
+
+--------------------------------------------------------------------------------
+CONCEPT 2 -- ADOPT THE GATEWAY, DO NOT AUTHOR IT
+--------------------------------------------------------------------------------
+CONCEPT
+    ADR-0003. Dialect normalization across many providers, virtual keys,
+    per-key budgets and spend logging are a large amount of software. LiteLLM
+    already has them. We operate it; we do not write it.
+
+    Keel's contribution is narrow and specific: generate the routing entry when
+    a deployment goes ready.
+
+--------------------------------------------------------------------------------
+CONCEPT 3 -- THE INVARIANT THIS STAGE WEAKENS, STATED OPENLY
+--------------------------------------------------------------------------------
+CONCEPT
+    The Azure design's I2 read "the control plane is never in the inference
+    request path", and it was true because API Management was Azure's problem.
+    It is no longer strictly true: LiteLLM is in the hot path and we run it.
+
+    The replacement is a hard constraint, not an aspiration:
+        THE GATEWAY MUST NEVER MAKE A SYNCHRONOUS CALL TO THE CONTROL PLANE OR
+        ITS DATABASE TO SERVE A REQUEST.
+
+    Routes and budgets are pushed as configuration and held in memory. The
+    control plane can be entirely down and every existing endpoint keeps
+    serving.
+
+WHY LITELLM STILL HAS A DATABASE
+    Its OWN store is a different thing from ours. The distinction is the one
+    that matters: a keel-db restart cannot touch inference, because LiteLLM
+    never reads keel-db. It loads its model list into memory and serves from
+    there.
+
+    The tempting shortcut -- point LiteLLM's config at the Keel database, one
+    source of truth, an afternoon's work -- converts a routine Postgres restart
+    into a total inference outage.
+
+IN THE CODE
+    deploy/gateway/postgres.yaml   the comment explaining exactly this, so that
+                                   nobody "simplifies" it later
+    control/gateway.py             module docstring restates the constraint
+
+--------------------------------------------------------------------------------
+CONCEPT 4 -- EVERY BACKEND IS ClusterIP
+--------------------------------------------------------------------------------
+    Invariant I1 is enforced by Kubernetes, not by convention: vLLM Services
+    are ClusterIP, the gateway holds the only Ingress, and each team namespace
+    carries a default-deny NetworkPolicy admitting only keel-gateway.
+
+    A developer who learns a Service DNS name still cannot call it.
+
+IN THE CODE
+    control/render/manifests.py   _service() -- "type": "ClusterIP", always
+    control/render/namespace.py   the default-deny NetworkPolicy
+    control/tests/test_full_pipeline.py::test_backend_service_is_not_reachable_directly
+
+--------------------------------------------------------------------------------
+BUGS FOUND IN THIS STAGE -- ALL THREE BY RUNNING IT
+--------------------------------------------------------------------------------
+ 1. hosted_vllm expects api_base to include /v1. Registering the bare Service
+    URL produced a 404 FROM UPSTREAM that reads exactly like a missing route.
+    The only way to tell them apart was the error saying "Hosted_vllmException"
+    -- i.e. LiteLLM had found the route and called the backend.
+    Fixed at control/gateway.py:60. The gateway owns that detail now rather
+    than leaking it to callers.
+
+ 2. gpu_count 0 read as "unset" by `or 1` -- the falsy-zero shape for the
+    second time (stage 1 had it with replicas_min). CPU serving became a GPU
+    request that charged quota for hardware the pod never asks for.
+    Fixed at control/api/main.py:173.
+
+ 3. /model/delete keys on LiteLLM's INTERNAL model id, not the name we
+    registered. Deregistration is now a lookup then a delete, and is a no-op
+    when absent so teardown is safe to retry.
+    control/gateway.py:79-96.
+
+--------------------------------------------------------------------------------
+A SELF-INCONSISTENCY CORRECTED -- MIGRATION 0003
+--------------------------------------------------------------------------------
+    catalog_mode_fields required weights_uri on every self_hosted model. But
+    ADR-0004's own middle path is "bake the two or three most-used models into
+    the image, mount the long tail", and control/render/ ALREADY omitted the
+    fetch-weights init container when weights_uri was absent.
+
+    The constraint was forbidding a shape the renderer supported. Relaxed to
+    require only accelerator, since placement must always be decidable.
+
+--------------------------------------------------------------------------------
+VERIFY
+--------------------------------------------------------------------------------
+    make cluster && make rbac && make gateway && make fake
+    make gateway-fwd            # in another shell
+    uv run pytest control/tests/test_full_pipeline.py -q
+
+    Expected log line, and the point of the whole stage:
+      provision.smoke_ok   reply='fake completion from keel'
+      provision.ready      route=<team>/chat secs=25.0

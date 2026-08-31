@@ -1,0 +1,134 @@
+================================================================================
+STAGE 2 -- CONTROL API CREATE PATH
+commit 4c32927
+================================================================================
+
+WHAT THIS STAGE PRODUCES
+    A developer can ask for a model and get a 202 with an id, a route and a
+    namespace. Nothing is provisioned yet -- a job is queued for stage 3.
+
+--------------------------------------------------------------------------------
+STEPS
+--------------------------------------------------------------------------------
+ 1. control/repo.py -- data access, every function taking an explicit
+    connection so the CALLER owns the transaction boundary.
+ 2. control/db.py -- pool plus a transaction() context manager.
+ 3. control/api/main.py -- the real create path.
+ 4. control/api/auth.py -- OIDC caller identity, with a dev bypass.
+ 5. control/catalog_sync.py -- catalog/*.yaml into catalog_models.
+ 6. Migration 0002 -- request fingerprint for idempotency.
+ 7. 17 integration tests against a real Postgres.
+
+--------------------------------------------------------------------------------
+CONCEPT 1 -- ONE TRANSACTION, AND WHY IT IS THE POINT OF THE STAGE
+--------------------------------------------------------------------------------
+CONCEPT
+    Architecture doc §3.2 step 02: insert the row, write the event, and insert
+    the job in ONE transaction. That is why a deployment row can never exist
+    without a job to act on it -- the class of bug where something is recorded
+    as requested and then silently never happens.
+
+IN THE CODE
+    control/api/main.py:131-208, all inside `async with db.transaction()`
+        :131   get_team(lock=True)
+        :205   record_transition(... REQUESTED ...)
+        :208   enqueue(... 'provision')
+
+    control/db.py  transaction()  commits on clean exit, rolls back on any
+    exception. Nothing partial can survive.
+
+CONCEPT 2 -- THE ROW LOCK, WHICH IS NOT OBVIOUS
+    The team row is SELECT ... FOR UPDATE *before* the GPU quota is read.
+    Without the lock, two concurrent requests for the same team each see room
+    for one more GPU and both succeed -- quota silently overshoots. The lock
+    serialises create-per-team, which at a few requests per week costs nothing.
+
+IN THE CODE
+    control/repo.py       get_team(conn, slug, lock=True)  appends FOR UPDATE
+    control/api/main.py:131
+
+--------------------------------------------------------------------------------
+CONCEPT 3 -- IDEMPOTENCY IS TWO SEPARATE PROBLEMS
+--------------------------------------------------------------------------------
+CONCEPT
+    (a) A replayed key must not create a second deployment.
+        Solved by: unique (team_id, idempotency_key), migration 0001.
+
+    (b) A key REUSED WITH A DIFFERENT BODY must not silently return the wrong
+        deployment. The unique constraint does nothing about this -- the client
+        gets back a deployment they did not ask for and never finds out.
+        Solved by: storing a fingerprint of the request and comparing it.
+
+    Same key + same body   = replay, return the original, 202
+    Same key + different body = client bug, 409
+
+IN THE CODE
+    control/migrations/0002_idempotency_fingerprint.sql
+    control/api/main.py:93    fingerprint() -- sha256 of canonical JSON
+    control/api/main.py:144   the Idempotent-Replay: true header
+
+WHY THE HEADER
+    A caller retrying after a timeout needs to distinguish "you created this
+    just now" from "this already existed". Both are 202; the header is what
+    separates them.
+
+--------------------------------------------------------------------------------
+CONCEPT 4 -- QUOTA COUNTS WHAT IS ABOUT TO EXIST
+--------------------------------------------------------------------------------
+CONCEPT
+    gpu_in_use counts every deployment except failed and deleted -- INCLUDING
+    ones still scheduling or loading. A deployment mid-provision is not holding
+    a GPU yet, but it is about to. Counting only `ready` lets a burst of
+    requests all pass the check while they are in flight, and the team ends up
+    over quota with no single request having been wrong.
+
+IN THE CODE
+    control/repo.py   gpu_in_use()   -- status not in ('failed', 'deleted')
+
+--------------------------------------------------------------------------------
+CONCEPT 5 -- FAIL CLOSED ON AUTH
+--------------------------------------------------------------------------------
+CONCEPT
+    The real OIDC path is not implemented. It returns 501. Local use requires
+    KEEL_DEV_AUTH=1 to be set explicitly.
+
+    A permissive default that "works for now" is exactly how a service ships
+    unauthenticated. A bypass that must be switched on cannot be left on by
+    accident.
+
+IN THE CODE
+    control/api/auth.py   DEV_AUTH gate, then `raise HTTPException(501, ...)`
+
+    Better to be obviously unauthenticated than quietly so.
+
+--------------------------------------------------------------------------------
+CONCEPT 6 -- ERRORS A DEVELOPER CAN ACT ON
+--------------------------------------------------------------------------------
+    control/api/errors.py   QuotaExceeded says how many are in use, how many
+                            the quota is, how many this needs, and what to do:
+                            "Delete an unused deployment or ask for more quota."
+
+    An error that says "invalid request" costs someone twenty minutes.
+
+--------------------------------------------------------------------------------
+BUG FOUND IN THIS STAGE
+--------------------------------------------------------------------------------
+    `gpus = entry.gpu_count or 1`  (found later, in stage 4)
+
+    The falsy-zero shape again. gpu_count 0 means CPU serving -- a real value,
+    not "unset" -- and `or 1` turned it into a GPU request that charged quota
+    for hardware the pod never asks for.
+
+    Fixed at control/api/main.py:173.
+
+--------------------------------------------------------------------------------
+VERIFY
+--------------------------------------------------------------------------------
+    make db && make migrate && make catalog && make seed
+    make test                       # 17 db-backed tests; skip cleanly without pg
+    make api                        # then:
+
+    curl -X POST localhost:8080/v1/deployments \
+      -H "Idempotency-Key: $(uuidgen)" -H 'Content-Type: application/json' \
+      -d '{"team":"platform","name":"chat",
+           "model":"qwen2.5-0.5b-instruct","allow_preview":true}'

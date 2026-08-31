@@ -1,0 +1,150 @@
+================================================================================
+STAGE 1 -- SCAFFOLD, SCHEMA, DOMAIN CORE
+commits fee141b, 9af1425
+================================================================================
+
+WHAT THIS STAGE PRODUCES
+    A repository shape, a database schema, and the pure logic that outlives any
+    particular substrate. No service does anything yet. That is deliberate: the
+    decisions made here are the expensive ones to reverse, and none of them
+    require a running system to get right.
+
+--------------------------------------------------------------------------------
+STEPS
+--------------------------------------------------------------------------------
+ 1. Chose the stack from what the machine actually had: Python 3.13, uv,
+    docker, kubectl. No Go toolchain. Python also matches the ecosystem --
+    vLLM and LiteLLM are both Python-native.
+ 2. Wrote 0001_init.sql with the FULL schema, including columns nothing uses yet.
+ 3. Wrote control/domain/ -- the state machine and validation rules.
+ 4. Wrote control/render/ -- deployment row to Kubernetes manifests.
+ 5. Wrote bench/fake-runtime -- a stand-in for vLLM.
+ 6. Wrote six ADRs, each with an explicit "revisit if".
+ 7. Picked a development model: Qwen2.5-0.5B-Instruct.
+
+--------------------------------------------------------------------------------
+CONCEPT 1 -- THE MODE DISCRIMINATOR SHIPS BEFORE IT IS USED
+--------------------------------------------------------------------------------
+CONCEPT
+    "Provision GPT-5" and "provision Llama on a GPU" are two different
+    mechanisms sharing one front door. They differ in provisioning, timing,
+    failure modes, cost and scaling; they are identical in identity, URL
+    issuance, policy and record-keeping. (Architecture doc, §2.3.)
+
+    A discriminator changes the SHAPE of every row rather than adding a column
+    to them, which makes it the one schema decision that is expensive to
+    retrofit and nearly free to include up front.
+
+IN THE CODE
+    control/migrations/0001_init.sql:10   create type mode_t
+    control/migrations/0001_init.sql:85   constraint mode_fields
+    control/migrations/0001_init.sql:91   constraint lane_mode
+
+    The CHECK constraint is the part that matters. Without it the mode column
+    is a comment, and within months there are rows that are neither one thing
+    nor the other. mode_fields forces self_hosted rows to carry an accelerator
+    and replica floor, and upstream rows to carry a provider model and neither
+    of those. lane_mode encodes that lane A *is* upstream and only upstream,
+    closing off a nonsense state before anything can create it.
+
+WHY IT MATTERS HERE
+    Phase 1 only implements self_hosted. The columns for upstream sit unused.
+    That is the point: adding them later means a migration that rewrites every
+    row and a code path that has to handle both shapes at once.
+
+--------------------------------------------------------------------------------
+CONCEPT 2 -- A PURE CORE WITH AN ENFORCED BOUNDARY
+--------------------------------------------------------------------------------
+CONCEPT
+    The state machine and the mode/lane rules are the part worth unit-testing
+    and the part that outlives any substrate. Keeping them free of
+    infrastructure is what makes a second backend cheap rather than a rewrite
+    (architecture doc §4.1, "the Azure door").
+
+IN THE CODE
+    control/domain/states.py:43           TRANSITIONS -- allowed edges only
+    control/domain/rules.py:42            resolve_lane
+    control/tests/test_no_infra_imports.py
+
+    The last file is the load-bearing one. It walks the AST of control/domain/
+    and fails if anything imports kubernetes, psycopg, httpx or fastapi. A
+    boundary that is not enforced by a test decays within weeks -- someone adds
+    "just one" import during a debugging session and it is never removed.
+
+DESIGN DETAIL
+    TRANSITIONS lists allowed edges rather than forbidden ones. Anything absent
+    is a bug, not a state to handle defensively. FAILED cannot return to READY:
+    a retry creates a NEW record, so the event history stays honest about what
+    actually happened rather than being rewritten by a recovery.
+
+--------------------------------------------------------------------------------
+CONCEPT 3 -- STATUS IS A PROJECTION OF AN EVENT LOG
+--------------------------------------------------------------------------------
+CONCEPT
+    Invariant I6. Status is never a field somebody sets; it is the latest entry
+    in a log. This is what makes "why is my endpoint down" answerable without
+    reading cluster logs at 3am.
+
+IN THE CODE
+    control/migrations/0001_init.sql      table deployment_events
+    control/repo.py                       record_transition() writes BOTH the
+                                          row update and the event, always
+                                          together, never separately
+
+--------------------------------------------------------------------------------
+CONCEPT 4 -- THE FAKE RUNTIME
+--------------------------------------------------------------------------------
+CONCEPT
+    The control path must be testable without a GPU. Without that, every
+    integration test costs GPU-hours, so nobody runs them, so there are none.
+
+IN THE CODE
+    bench/fake-runtime/app.py
+
+    It answers the OpenAI API with canned responses AND reports 503 on /health
+    for its first seconds, so the scheduling -> loading -> ready transition is
+    real rather than instantaneous. It also serves plausible vLLM Prometheus
+    metrics, which is what the future estimator would consume.
+
+--------------------------------------------------------------------------------
+CONCEPT 5 -- THE DEVELOPMENT FIXTURE IS SMALL ON PURPOSE (commit 9af1425)
+--------------------------------------------------------------------------------
+CONCEPT
+    In phase 1 the model is a TEST FIXTURE, not a product decision. What is
+    being tested is the control path. So the right model is the one with the
+    shortest request -> ready -> callable loop.
+
+    But not for the baseline measurement: weight-load time DOMINATES
+    time-to-ready, so baselining on a 0.5B produces a real number that says
+    nothing about whether the node-local weights cache (ADR-0004) earns its
+    keep. Two models, two jobs.
+
+IN THE CODE
+    catalog/qwen2.5-0.5b-instruct.yaml    the fixture -- ~1GB, seconds to load
+    catalog/qwen2.5-7b-instruct.yaml      the baseline run, once
+    docs/baseline.md                      says which to use for what
+
+SIDE NOTE
+    Apache-2.0 was chosen deliberately. The dev fixture should never be the
+    thing that makes someone read a licence -- and open weights are not
+    uniformly open, which is why catalog_models carries a license column.
+
+--------------------------------------------------------------------------------
+BUG FOUND IN THIS STAGE
+--------------------------------------------------------------------------------
+    `if lane is Lane.B and (req.replicas_min or 1) < 1`
+
+    `0 or 1` evaluates to 1, so an explicit replicas_min=0 sailed past the
+    check that exists specifically to reject it -- a lane B deployment could
+    have been created scaled to zero.
+
+    Fixed at control/domain/rules.py:76 with an explicit `is not None`.
+
+    This falsy-zero shape appears AGAIN in stage 2 (gpu_count). Worth knowing
+    about: in this codebase 0 is almost always a meaningful value, never
+    "unset".
+
+--------------------------------------------------------------------------------
+VERIFY
+--------------------------------------------------------------------------------
+    make dev && make test-unit          # needs nothing at all -- no db, no cluster

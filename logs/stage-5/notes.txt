@@ -1,0 +1,168 @@
+================================================================================
+STAGE 5 -- RECONCILER, AND MAKING THE INVARIANTS ENFORCEABLE
+commit ed13f34
+================================================================================
+
+WHAT THIS STAGE PRODUCES
+    The database stays a truthful description of the world. Drift is detected
+    and corrected; orphans are reported and left alone; the permissions that
+    the invariants claim actually exist.
+
+--------------------------------------------------------------------------------
+STEPS
+--------------------------------------------------------------------------------
+ 1. control/reconciler/diff.py -- decisions, PURE.
+ 2. control/reconciler/main.py -- the loop; reads cluster, writes Postgres.
+ 3. deploy/rbac.yaml -- the permissions.
+ 4. control/tests/test_rbac.py -- assert them against a live authorizer.
+ 5. Fixed the gap that test found.
+
+--------------------------------------------------------------------------------
+CONCEPT 1 -- A CONTRADICTION IN THE ARCHITECTURE DOC, RESOLVED
+--------------------------------------------------------------------------------
+    §3.3 pseudocode:  "spec differs from render -> updating, RE-APPLY desired"
+    Invariant I5:     "the Reconciler's ServiceAccount is read-only"
+
+    Both cannot hold. Re-applying needs patch permission, which is exactly the
+    power I5 forbids.
+
+RESOLUTION
+    The Reconciler reads the cluster and writes ONLY to Postgres -- status,
+    events, jobs. When it finds drift it ENQUEUES a job. The Provisioner, which
+    holds the write RBAC, does the re-apply.
+
+    This is better than the doc: it keeps exactly one component able to mutate
+    the cluster, so there is never a question of which one won.
+
+IN THE CODE
+    control/reconciler/main.py   _apply() inserts a job; never calls cluster
+                                 write methods
+    control/reconciler/diff.py   module docstring records the contradiction and
+                                 the resolution, so the next reader does not
+                                 "fix" it back
+
+PROVEN
+    test_reconcile_e2e.py::test_manual_scale_is_detected_as_drift asserts the
+    object is STILL at replicas=4 after the reconcile pass:
+        "the Reconciler wrote to the cluster; it must only enqueue"
+
+--------------------------------------------------------------------------------
+CONCEPT 2 -- COMPARE ONLY WHAT YOU OWN
+--------------------------------------------------------------------------------
+CONCEPT
+    The obvious implementation -- deep-compare the rendered spec against the
+    live spec -- does not work. The API server fills in dozens of defaults we
+    never set: dnsPolicy, terminationGracePeriodSeconds, strategy, empty
+    resource maps, revision annotations. A naive diff reports drift on every
+    pass, forever, and the platform fights itself.
+
+    So: extract the MATERIAL fields -- image, args, gpu limit, nodeSelector,
+    replicas -- and compare those.
+
+IN THE CODE
+    control/reconciler/diff.py:47   material()
+    control/tests/test_reconcile.py::test_defaults_the_api_server_adds_are_not_drift
+
+--------------------------------------------------------------------------------
+CONCEPT 3 -- LANE C'S REPLICA COUNT IS NOT OURS
+--------------------------------------------------------------------------------
+    KEDA scales lane C between 0 and max as traffic moves. Comparing that
+    against the rendered value would report drift EVERY TIME THE AUTOSCALER DID
+    ITS JOB, and the Reconciler would keep scaling it back.
+
+IN THE CODE
+    control/reconciler/diff.py:68   compare_replicas_for(lane)
+
+    The same asymmetry appears in availability: zero ready replicas is a FAULT
+    for lane B and the EXPECTED STEADY STATE for lane C. Getting it backwards
+    gives either a permanently alarming dashboard or a real outage nobody
+    notices.
+
+--------------------------------------------------------------------------------
+CONCEPT 4 -- DO NOT FIGHT THE PROVISIONER
+--------------------------------------------------------------------------------
+    Two safeguards, both necessary:
+
+      - deployments with an OPEN JOB are skipped -- the Provisioner is
+        mid-flight on them
+      - only ready / degraded / scaled_to_zero are reconciled at all;
+        requested, validating, scheduling and loading belong to the Provisioner
+
+IN THE CODE
+    control/reconciler/diff.py:25    RECONCILABLE
+    control/reconciler/main.py:31    the has_job subquery
+    control/reconciler/main.py:113   the skip
+
+--------------------------------------------------------------------------------
+CONCEPT 5 -- ORDER OF JUDGEMENT: EXISTENCE, AVAILABILITY, DRIFT
+--------------------------------------------------------------------------------
+    A workload that is GONE cannot be meaningfully compared.
+    A workload that is DOWN should read as down, not as configuration drift.
+
+    So assess() checks existence, then ready replicas, and only then compares
+    fields. test_availability_is_reported_before_drift pins this: a deployment
+    that is both down AND has the wrong image reports no_ready_replicas.
+
+IN THE CODE
+    control/reconciler/diff.py:79   assess()
+
+--------------------------------------------------------------------------------
+CONCEPT 6 -- AN INVARIANT IS ONLY STRUCTURAL IF SOMETHING ENFORCES IT
+--------------------------------------------------------------------------------
+CONCEPT
+    Comments and commit messages had been saying "structurally impossible" and
+    "enforced by the API server". That was aspiration until deploy/rbac.yaml
+    existed, and it stays true only as long as nobody widens a role.
+
+    So the permissions were written down, and then ASSERTED against a live
+    authorizer using SubjectAccessReview.
+
+IN THE CODE
+    deploy/rbac.yaml              the roles
+    control/tests/test_rbac.py    15 assertions against the real authorizer
+
+VERIFIED FACTS (not claims)
+    reconciler CAN list deployments, read pod logs         yes
+    reconciler CANNOT delete / patch / create deployments  no
+    reconciler CANNOT delete namespaces                    no
+    provisioner CAN create namespaces                      yes
+    provisioner CANNOT delete namespaces, read secrets     no
+    control API CANNOT do anything in the cluster at all   no
+
+    Widening a ClusterRole now FAILS THE SUITE, instead of quietly downgrading
+    a guarantee to a comment.
+
+--------------------------------------------------------------------------------
+THE GAP THAT TEST FOUND -- THE MOST VALUABLE RESULT OF THE STAGE
+--------------------------------------------------------------------------------
+    test_provisioner_can_write_workloads FAILED on first run, and the CODE was
+    wrong, not the test.
+
+    The Provisioner's workload permissions are NAMESPACED -- granted by a
+    RoleBinding in each team namespace, deliberately with no ClusterRoleBinding,
+    because that is what keeps invariant I4 ("nothing is created outside
+    keel-inf-*") enforced by the API server.
+
+    Nothing was creating that RoleBinding.
+
+    Everything worked locally only because the Provisioner ran with an admin
+    kubeconfig. On the first real deploy with a ServiceAccount it would have
+    failed at step 05, on every deployment, for every team.
+
+FIXED IN
+    control/render/namespace.py   the RoleBinding is now created at onboarding,
+                                  alongside the ResourceQuota and NetworkPolicy
+    control/k8s.py                RoleBinding added to RESOURCES
+
+LESSON
+    Running as admin in development hides an entire class of production
+    failure. The test that impersonates the real ServiceAccount is the only
+    thing that would have caught it before deploy.
+
+--------------------------------------------------------------------------------
+VERIFY
+--------------------------------------------------------------------------------
+    make cluster && make rbac
+    uv run pytest control/tests/test_reconcile.py -q      # pure
+    uv run pytest control/tests/test_rbac.py -q           # live authorizer
+    uv run pytest control/tests/test_reconcile_e2e.py -q  # real drift

@@ -1,0 +1,157 @@
+================================================================================
+STAGE 3 -- PROVISIONER
+commit d6e6913
+================================================================================
+
+WHAT THIS STAGE PRODUCES
+    The queued job becomes real objects in a cluster, and the deployment walks
+    scheduling -> loading -> ready. Implements steps 04-11 of §3.2.
+
+--------------------------------------------------------------------------------
+STEPS
+--------------------------------------------------------------------------------
+ 1. Installed k3d, created a local cluster.
+ 2. control/k8s.py -- a thin client that does server-side apply only.
+ 3. control/provisioner/status.py -- pod dicts to phase, PURE.
+ 4. control/gateway.py -- registration seam, with a NullGateway for now.
+ 5. control/provisioner/main.py -- the worker loop.
+ 6. Unit tests for every failure mode; e2e tests against the real API server.
+
+--------------------------------------------------------------------------------
+CONCEPT 1 -- SERVER-SIDE APPLY IS THE IDEMPOTENCY MECHANISM
+--------------------------------------------------------------------------------
+CONCEPT
+    ADR-0002. A redelivered job must converge on the same objects rather than
+    duplicating them. Three options existed:
+
+      CRD + operator  -- idiomatic, but two reconcile loops that can disagree
+      Helm releases   -- adds a release store: a THIRD source of truth
+      server-side apply -- convergence for free, no new state
+
+    The mechanism is: object names derive deterministically from deployment_id
+    (`vllm-{id}`), and every apply goes through one field manager.
+
+IN THE CODE
+    control/k8s.py:18    FIELD_MANAGER = "keel-provisioner"
+    control/k8s.py:68    Content-Type: application/apply-patch+yaml
+    control/k8s.py:69    fieldManager + force
+    control/domain/rules.py:82   object_name()
+
+PROVEN, NOT ASSUMED
+    control/tests/test_provision_e2e.py asserts that after THREE applies,
+    metadata.generation is still 1. Generation only increments on a real spec
+    change, so the API server saw no change at all -- true convergence, not a
+    same-shaped overwrite each round.
+
+    (The first version of that test asserted our field manager was the ONLY
+    one. That failed: the k3s controller legitimately co-owns the status
+    subresource. Generation is the stronger and more honest assertion.)
+
+--------------------------------------------------------------------------------
+CONCEPT 2 -- FAILURE CLASSIFICATION IS PURE, ON PURPOSE
+--------------------------------------------------------------------------------
+CONCEPT
+    Pod-status handling is exactly the code that is hardest to reproduce on
+    demand (you cannot summon an OOM at will) and easiest to get wrong. So it
+    takes dicts and returns a phase, with no cluster access at all -- every
+    failure mode is then a unit test with a literal fixture.
+
+IN THE CODE
+    control/provisioner/status.py:64   classify(pods, elapsed_seconds)
+    control/tests/test_status.py        11 tests, no cluster, no GPU
+
+ORDERING RULE
+    Fatal container states are checked BEFORE progress states. A pod can be
+    phase=Running with a crashlooping container; reporting "loading" there
+    would hide the crash until the 30-minute timeout.
+
+--------------------------------------------------------------------------------
+CONCEPT 3 -- SCHEDULING AND LOADING ARE DIFFERENT STATES
+--------------------------------------------------------------------------------
+CONCEPT
+    §2.4. "Waiting for a node to accept the pod" and "loading 140GB of weights
+    into VRAM" fail for entirely different reasons and take entirely different
+    amounts of time. Collapsing them into one `provisioning` state gives the
+    user a spinner that means either "no capacity, this will never work" or
+    "downloading, please wait" -- the worst possible experience.
+
+IN THE CODE
+    control/domain/states.py   SCHEDULING and LOADING as separate members
+    control/provisioner/status.py  classify() distinguishes them by whether any
+                                   container has started
+
+--------------------------------------------------------------------------------
+CONCEPT 4 -- UNSCHEDULABLE GETS A GRACE PERIOD (a change from the doc)
+--------------------------------------------------------------------------------
+    The architecture doc says unschedulable "fails immediately and
+    permanently". In practice a node may be draining or another pod
+    terminating, so failing at second one produces false failures on a busy
+    cluster. It is only permanent once nothing has moved for a while.
+
+IN THE CODE
+    control/provisioner/status.py:29   UNSCHEDULABLE_GRACE_SECONDS = 120
+
+--------------------------------------------------------------------------------
+CONCEPT 5 -- THE LOG TAIL IS THE POINT OF A FAILURE EVENT
+--------------------------------------------------------------------------------
+    A `failed` event with reason_code='oom' is useful. One that also carries
+    the container's last 40 lines is actionable, because vLLM says precisely
+    how much memory it wanted.
+
+IN THE CODE
+    control/k8s.py                pod_logs()
+    control/provisioner/main.py   _wait_for_ready() attaches them on failure
+
+--------------------------------------------------------------------------------
+CONCEPT 6 -- SMOKE-TEST THROUGH THE GATEWAY, AND NEVER PASS SILENTLY
+--------------------------------------------------------------------------------
+    §3.2 step 10. A readiness probe says the process is up; a real completion
+    says the endpoint WORKS. An endpoint that starts but returns garbage is
+    worse than one that failed, because nobody finds out until a developer does.
+
+IN THE CODE
+    control/provisioner/main.py:151-163
+    control/gateway.py            NullGateway logs a WARNING and raises rather
+                                  than returning success
+
+    A smoke test that cannot reach a gateway must read as "not verified", never
+    as a pass. That distinction is why NullGateway is loud.
+
+--------------------------------------------------------------------------------
+CONCEPT 7 -- TWO RENDER KNOBS THAT ARE FEATURES, NOT TEST HACKS
+--------------------------------------------------------------------------------
+    gpu_count == 0            -> CPU serving. No accelerator nodeSelector, no
+                                 GPU limit, no toleration. Real for small models
+                                 on vLLM's CPU backend.
+    KEEL_RUNTIME_IMAGE        -> the runtime image is pinned per environment.
+
+    Together they are why the entire control path runs on a cluster with no GPU.
+    Neither is conditional on a test flag; both are legitimate configuration.
+
+IN THE CODE
+    control/render/manifests.py   _placement(), _resources(), _weights_fetcher()
+
+--------------------------------------------------------------------------------
+BUGS FOUND IN THIS STAGE
+--------------------------------------------------------------------------------
+ 1. OOM read only from `state`, not `lastState`. A RESTARTED container reports
+    OOMKilled only in lastState, so a pod crashlooping on OOM was classified as
+    "loading" and would have sat there until the 30-minute timeout.
+    control/provisioner/status.py:91
+
+ 2. The fake runtime had no ENTRYPOINT. Kubernetes `args` REPLACES CMD rather
+    than appending to it, so passing engine flags to an image with only a CMD
+    tried to exec `--model` and crashlooped. Real vLLM images have an
+    entrypoint; the fake did not. Only found by running the real manifest
+    against a real API server.
+
+ 3. kubernetes_asyncio's generated deserializer mangles arbitrary JSON -- it is
+    built around typed models. control/k8s.py now reads the raw response and
+    parses it itself.
+
+--------------------------------------------------------------------------------
+VERIFY
+--------------------------------------------------------------------------------
+    make cluster && make rbac && make fake
+    uv run pytest control/tests/test_status.py -q            # pure, instant
+    uv run pytest control/tests/test_provision_e2e.py -q     # needs the cluster
