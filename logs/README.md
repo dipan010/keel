@@ -12,6 +12,7 @@ principle that quietly stops being true.
 | 3     | Provisioner                      | `d6e6913` |
 | 4     | Gateway wiring                   | `49b8180` |
 | 5     | Reconciler and RBAC              | `ed13f34` |
+| 6     | GPU placement, without a GPU     | `70bf15b` |
 
 Read them in order. Each stage assumes the one before it.
 

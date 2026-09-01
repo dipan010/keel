@@ -61,6 +61,9 @@ gateway:      ## deploy litellm + its own database into the cluster
 	kubectl apply -f deploy/gateway/
 	kubectl rollout status deploy/litellm -n keel-gateway --timeout=300s
 
+fake-gpu:     ## advertise a GPU that does not exist -- placement only, see the script
+	./deploy/kind/fake-gpu.sh
+
 gateway-fwd:  ## port-forward the gateway to localhost:4000
 	kubectl port-forward -n keel-gateway svc/litellm 4000:4000
 

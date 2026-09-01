@@ -1,0 +1,130 @@
+================================================================================
+STAGE 6 -- GPU PLACEMENT, WITHOUT A GPU
+================================================================================
+
+WHAT THIS STAGE PRODUCES
+    The scheduling half of GPU support, under test, for nothing. Node selector,
+    taint toleration, resource limits, ResourceQuota and the unschedulable
+    failure path are all exercised against a real scheduler.
+
+    It produces NO evidence that a model runs on a GPU. That distinction is the
+    whole point of the stage and is stated at the top of every artefact it adds.
+
+--------------------------------------------------------------------------------
+WHY THIS STAGE EXISTS
+--------------------------------------------------------------------------------
+    After stage 5 the remaining gap was described as "we need a GPU". That was
+    two unknowns wearing one coat:
+
+      1. does our PLACEMENT work?   -- needs a node that CLAIMS a GPU
+      2. does vLLM behave as we assume?  -- needs a real GPU
+
+    Only the second costs money. Separating them retired most of the risk for
+    free and left a much smaller, clearer thing to buy later.
+
+--------------------------------------------------------------------------------
+CONCEPT 1 -- EXTENDED RESOURCES
+--------------------------------------------------------------------------------
+CONCEPT
+    A node's status.capacity may advertise arbitrary resource names, and the
+    kubelet does not verify that hardware exists behind them. This is the same
+    mechanism a real device plugin uses -- the plugin simply writes the value
+    on the node's behalf. Nothing stops us writing it directly.
+
+    Once advertised, the scheduler treats nvidia.com/gpu as a real, countable,
+    allocatable resource: it honours requests, refuses to overcommit it, and
+    counts it against ResourceQuota.
+
+IN THE CODE
+    deploy/kind/fake-gpu.sh     the patch, plus label and taint
+    make fake-gpu
+
+    kubectl patch node <n> --subresource=status --type=json \
+      -p '[{"op":"add","path":"/status/capacity/nvidia.com~1gpu","value":"4"}]'
+
+    (~1 is JSON-Pointer escaping for the / in nvidia.com/gpu.)
+
+WHY A SEPARATE NODE
+    A NoSchedule taint on the existing agent would have stranded LiteLLM and
+    the gateway database on their next restart. A dedicated node is also closer
+    to production, where GPUs live in their own pool.
+
+RE-RUNNABLE ON PURPOSE
+    Advertised capacity is lost if the node re-registers, so this is a script
+    and a make target rather than a command someone once ran.
+
+--------------------------------------------------------------------------------
+CONCEPT 2 -- WHAT THE THREE NEW TESTS ACTUALLY BUY
+--------------------------------------------------------------------------------
+ 1. PLACEMENT  test_gpu_request_lands_on_the_gpu_node
+    Until now EVERY deployment in every test used gpu_count 0, which renders no
+    nodeSelector, no toleration and no resource limit. That entire branch of
+    control/render/manifests.py -- _placement() and _resources() -- had never
+    been executed against a scheduler. It now is, and the pod is asserted to
+    land on the GPU node specifically, not merely somewhere.
+
+ 2. UNSCHEDULABLE  test_unknown_accelerator_is_unschedulable_for_real
+    classify() had only ever seen a hand-written fixture for this condition.
+    It now reads a real PodScheduled=False/Unschedulable produced by a real
+    scheduler, and the 120s grace period is exercised end to end: inside the
+    window the pod is SCHEDULING, past it FAILED.
+
+ 3. QUOTA  test_resourcequota_rejects_the_gpu_that_exceeds_it
+    Quota is enforced in TWO places -- the API's gpu_in_use check and the
+    namespace ResourceQuota. Only the first had tests, yet the second is what
+    protects against anything that reaches the cluster WITHOUT going through
+    our API. It was unverified YAML until this stage.
+
+    Detail worth knowing: quota is enforced at POD admission, not on the
+    Deployment. The third Deployment is accepted; its ReplicaSet then fails to
+    create a pod. So the assertion counts pods and reads the quota's status,
+    rather than expecting the apply to fail.
+
+--------------------------------------------------------------------------------
+CONCEPT 3 -- NAMING AGAINST FALSE CONFIDENCE
+--------------------------------------------------------------------------------
+    The risk of this trick is that someone later reads a green suite as "GPU
+    works". So the guard is repeated in three places rather than assumed:
+
+      control/tests/test_gpu_scheduling_e2e.py   module docstring
+      deploy/kind/fake-gpu.sh                    header comment
+      README.md                                  the make fake-gpu paragraph
+
+    All three say the same thing: this validates placement, not execution. No
+    CUDA exists. No model is accelerated.
+
+--------------------------------------------------------------------------------
+FOUND WHILE RUNNING IT
+--------------------------------------------------------------------------------
+    The new node had none of the images imported by `make fake`, so the first
+    run failed with ImagePullBackOff -- which looks nothing like a scheduling
+    problem and would have wasted someone's afternoon.
+
+    The classifier caught it correctly and reported image_pull_failed with the
+    registry's own message, which is a small piece of evidence that stage 3's
+    failure taxonomy is pulling its weight.
+
+    fake-gpu.sh now re-imports the image after adding a node.
+
+--------------------------------------------------------------------------------
+WHAT REMAINS UNVALIDATED -- STATED PLAINLY
+--------------------------------------------------------------------------------
+    - real vLLM engine flags and their interactions
+    - OOM at weight load, and whether the classifier's message matches reality
+    - chat-template mismatches
+    - vLLM's actual Prometheus metric names, which the KEDA trigger in
+      _scaled_object and the future estimator both depend on
+    - any wall-clock number for docs/baseline.md
+
+    The first four are answerable on a free Colab or Kaggle GPU without a
+    cluster. The last genuinely needs one rented hour on hardware you would
+    really run, because it is a measurement rather than a behaviour.
+
+--------------------------------------------------------------------------------
+VERIFY
+--------------------------------------------------------------------------------
+    make cluster && make fake && make fake-gpu
+    uv run pytest control/tests/test_gpu_scheduling_e2e.py -q
+
+    kubectl get node k3d-keel-gpu-0 \
+      -o jsonpath='{.status.allocatable.nvidia\.com/gpu}'      # -> 4

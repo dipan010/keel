@@ -64,6 +64,7 @@ database, so `make test` works on a laptop with nothing running.
 ```bash
 make cluster     # local k3d cluster
 make rbac        # service accounts and roles
+make fake-gpu    # a node that claims a GPU it does not have
 make gateway     # litellm + its own database
 make fake        # build the fake vLLM and load it in
 make gateway-fwd # port-forward :4000, in another shell
@@ -76,6 +77,11 @@ seconds so the `scheduling -> loading -> ready` path is real. Combined with
 `gpu_count: 0` (CPU serving), the entire control path runs on a cluster with no
 GPU -- without which every integration test costs GPU-hours and nobody runs
 them.
+
+`make fake-gpu` advertises `nvidia.com/gpu` on a node through Kubernetes'
+extended-resource mechanism. That validates **placement** -- node selector,
+toleration, resource limits, quota, and the unschedulable path -- with no
+hardware. It says nothing about whether a model runs on a GPU.
 
 Four test tiers, each skipping cleanly when its dependency is absent:
 `test-unit` needs nothing, the database suite needs Postgres, the cluster suite

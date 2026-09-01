@@ -21,6 +21,7 @@ FIELD_MANAGER = "keel-provisioner"
 #: small, fixed by control/render/, and a typo should fail at import not at 3am.
 RESOURCES: dict[str, tuple[str, str, str]] = {
     "Namespace": ("", "v1", "namespaces"),
+    "Node": ("", "v1", "nodes"),
     "ResourceQuota": ("", "v1", "resourcequotas"),
     "NetworkPolicy": ("networking.k8s.io", "v1", "networkpolicies"),
     "RoleBinding": ("rbac.authorization.k8s.io", "v1", "rolebindings"),
