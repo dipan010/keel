@@ -1,0 +1,185 @@
+================================================================================
+STAGE 7 -- THE COLAB PROBE, AND WHAT IT CORRECTED
+================================================================================
+
+WHAT THIS STAGE PRODUCES
+    The first contact between this codebase and a real vLLM on a real GPU.
+    It cost nothing -- a free Colab T4 -- and it found one live bug and three
+    wrong assumptions that had been sitting in the code since stage 3.
+
+--------------------------------------------------------------------------------
+WHY A PROBE AND NOT A CLUSTER
+--------------------------------------------------------------------------------
+    Stage 6 split "we need a GPU" into placement (free, done) and vLLM
+    behaviour (needs a real GPU). This stage does the second half.
+
+    None of the four questions need a cluster: they are about what vLLM emits
+    and how it fails. So the probe runs vLLM directly in a notebook and reads
+    /metrics over HTTP -- no Kubernetes, no Keel, no money.
+
+--------------------------------------------------------------------------------
+RUN 1 -- FAILED BEFORE VLLM STARTED
+--------------------------------------------------------------------------------
+    `pip install vllm` upgraded torch, which then mismatched Colab's
+    PREINSTALLED torchaudio. transformers imports torchaudio unconditionally,
+    so the CUDA version check raised during import:
+
+        RuntimeError: Detected that PyTorch and torchaudio were compiled with
+                      different CUDA versions
+
+    vLLM never reached its own code. The ConnectionRefused failures further
+    down the notebook were consequences, not separate problems.
+
+    Fixed by installing into an isolated uv venv. The notebook kernel only
+    talks to the server over HTTP, so it needs none of vLLM's dependencies.
+
+    KEPT, in bench/colab/run-1-failed.md, because it is not a vLLM or T4
+    problem at all -- it is a host packaging conflict, which is exactly the
+    class of failure that running vLLM in a container with pinned dependencies
+    exists to prevent. A small piece of evidence for the design.
+
+--------------------------------------------------------------------------------
+FINDING 1 -- A LIVE BUG WITH NO SYMPTOM  (the important one)
+--------------------------------------------------------------------------------
+    _scaled_object rendered this KEDA trigger:
+
+        sum(rate(vllm:request_success_total{deployment_id="..."}[2m]))
+
+    The metric name is CORRECT -- vllm:request_success_total is real, and is
+    among the 96 metrics vLLM 0.28.0 emitted.
+
+    But deployment_id is NOT a label vLLM emits. It emits model_name and
+    engine. So the selector matched nothing, KEDA would read zero, and a lane C
+    deployment would come up healthy and SILENTLY NEVER SCALE. Nothing errors.
+    Nothing alerts. The dashboard looks fine.
+
+    This is the exact trap named as a risk when the second-engine idea was
+    discussed -- except it was already present, for the engine we do use.
+
+FIXED BY
+    control/render/namespace.py   a PodMonitor per team namespace whose
+                                  relabelings copy the pod label
+                                  keel.io/deployment-id onto every scraped
+                                  series as deployment_id
+    control/render/manifests.py   the container and Service ports are now named
+                                  "http", which the PodMonitor selects by name
+    control/tests/test_metrics_contract.py
+                                  asserts the queried metric appears in the
+                                  observed list, that the PodMonitor supplies
+                                  the label, and that the port names agree
+
+--------------------------------------------------------------------------------
+FINDING 2 -- THE METRIC NAMES WE ASSUMED WERE PARTLY WRONG
+--------------------------------------------------------------------------------
+    MISSING  vllm:time_to_first_token_seconds
+    MISSING  vllm:time_per_output_token_seconds
+    MISSING  vllm:gpu_cache_usage_perc
+
+    Not absent -- differently shaped:
+
+      TTFT and TPOT are HISTOGRAMS. The series are _bucket / _count / _sum,
+      with no bare gauge. Anything reading them (deployment_metrics.ttft_p50_ms
+      and tpot_p50_ms) must use the suffixes and compute quantiles.
+
+      gpu_cache_usage_perc has been RENAMED to kv_cache_usage_perc.
+
+    Pinned in test_metrics_contract.py against the recorded output, so the next
+    vLLM upgrade that renames something fails a test rather than a dashboard.
+
+--------------------------------------------------------------------------------
+FINDING 3 -- dtype FAILS SILENTLY, WHICH IS WORSE THAN FAILING
+--------------------------------------------------------------------------------
+    Expectation: a T4 (compute 7.5, no bfloat16) would ERROR on a bf16 model.
+
+    Reality:
+        WARNING [model.py:2299] Casting torch.bfloat16 to torch.float16.
+
+    It downcasts and carries on. In a fleet with mixed accelerators that means
+    one catalog entry runs at different precision on different nodes, with
+    nothing in the deployment record to show for it.
+
+FIXED BY
+    ADR-0007        dtype is explicit in every self-hosted catalog entry
+    catalog/*.yaml  dtype: float16 (0.5B, T4-friendly) / bfloat16 (7B)
+
+--------------------------------------------------------------------------------
+FINDING 4 -- THE OOM TEST DID NOT OOM
+--------------------------------------------------------------------------------
+    Asking for max-model-len 200000 on a 16GB card did not exhaust memory. vLLM
+    refused the CONFIG before allocating anything:
+
+        pydantic ValidationError for ModelConfig: User-specified max_model_len
+        (200000) is greater than the derived max_model_len
+        (max_position_embeddings=32768.0)
+
+    So there is a whole failure class the design had not accounted for:
+    configuration rejected at startup. It is fast, costs no GPU time, and would
+    have surfaced through our classifier as "crashloop" -- accurate and
+    useless.
+
+FIXED BY
+    control/provisioner/status.py   classify_log(), a table of real log
+                                    signatures mapped to precise reason codes
+                                    and actionable advice
+    control/provisioner/main.py     when the pod-status classifier says FAILED,
+                                    the log tail is checked for a better
+                                    explanation before the event is written
+    control/tests/test_log_signatures.py
+                                    every signature tested, the config error
+                                    read verbatim from the recorded results
+
+--------------------------------------------------------------------------------
+FINDING 5 -- ADR-0004 WAS TOO BROAD  (a design claim, corrected)
+--------------------------------------------------------------------------------
+    ADR-0004 called the node-local weights cache "the single biggest lever on
+    time-to-ready". Measured, for a 0.5B model:
+
+        model loading (0.93 GiB)                 24.7s
+        engine init: profile, KV cache, warmup   46.1s   (compile 20.3s)
+        CUDA graph capture                        9.0s
+        TOTAL TO READY                          130.1s
+
+    Weight handling is under a fifth. The rest is FIXED engine startup cost
+    that does not shrink with the model -- roughly the same for 0.5B as for
+    70B.
+
+    The claim holds for large models and is close to irrelevant below a few GB.
+    ADR-0004 now says so, with the numbers.
+
+    CONSEQUENCE FOR LANE C: scale-to-zero cold start is dominated by
+    compilation and graph capture, not weights. --enforce-eager removes both
+    (~30s here) at some inference cost, making it a real lever for lane C and
+    the wrong default for lane B.
+
+--------------------------------------------------------------------------------
+ALSO ADDED
+--------------------------------------------------------------------------------
+    control/k8s.py   OPTIONAL_KINDS. A server-side apply CREATES an absent
+                     object, so a 404 means the KIND is unknown -- not that the
+                     object is missing. ScaledObject and PodMonitor are skipped
+                     with a warning when KEDA or prometheus-operator are not
+                     installed.
+
+                     This was a latent problem, not a new one: lane C has
+                     always rendered a ScaledObject, and applying it to a
+                     cluster without KEDA would have failed. No test had ever
+                     driven lane C against a real cluster.
+
+--------------------------------------------------------------------------------
+STILL UNVALIDATED
+--------------------------------------------------------------------------------
+    - a real OOM (the config check fired first; needs a model that fits on
+      disk but not in VRAM)
+    - multi-GPU, tensor parallelism
+    - any wall-clock number for docs/baseline.md, which needs one rented hour
+      on hardware you would actually run -- a T4 is not that, and Colab's disk
+      and network are not your cluster's
+
+--------------------------------------------------------------------------------
+VERIFY
+--------------------------------------------------------------------------------
+    uv run pytest control/tests/test_metrics_contract.py \
+                  control/tests/test_log_signatures.py -q
+
+    Both read bench/colab/results-2026-09-01.json, so they assert against what
+    a real vLLM emitted rather than against what we assumed it would.

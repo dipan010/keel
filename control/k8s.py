@@ -12,8 +12,11 @@ import json
 import os
 from typing import Any
 
+import structlog
 from kubernetes_asyncio import client, config
 from kubernetes_asyncio.client.exceptions import ApiException
+
+log = structlog.get_logger()
 
 FIELD_MANAGER = "keel-provisioner"
 
@@ -28,9 +31,17 @@ RESOURCES: dict[str, tuple[str, str, str]] = {
     "Service": ("", "v1", "services"),
     "Deployment": ("apps", "v1", "deployments"),
     "ScaledObject": ("keda.sh", "v1alpha1", "scaledobjects"),
+    "PodMonitor": ("monitoring.coreos.com", "v1", "podmonitors"),
 }
 
 NAMESPACED = {k for k in RESOURCES if k != "Namespace"}
+
+#: Kinds provided by operators that may not be installed. A server-side apply
+#: creates the object when absent, so a 404 here means the KIND is unknown --
+#: not that the object is missing. Skip rather than fail: a cluster without
+#: KEDA can still run lane B, and one without prometheus-operator can still
+#: serve traffic.
+OPTIONAL_KINDS = {"ScaledObject", "PodMonitor"}
 
 
 async def load() -> None:
@@ -62,13 +73,19 @@ class Cluster:
             base = f"/api/{version}"
         path = f"{base}/namespaces/{ns}/{plural}/{name}" if ns else f"{base}/{plural}/{name}"
 
-        return await self._call(
-            path,
-            "PATCH",
-            body=obj,
-            headers={"Content-Type": "application/apply-patch+yaml"},
-            query=[("fieldManager", FIELD_MANAGER), ("force", "true")],
-        )
+        try:
+            return await self._call(
+                path,
+                "PATCH",
+                body=obj,
+                headers={"Content-Type": "application/apply-patch+yaml"},
+                query=[("fieldManager", FIELD_MANAGER), ("force", "true")],
+            )
+        except ApiException as exc:
+            if exc.status == 404 and kind in OPTIONAL_KINDS:
+                log.warning("apply.kind_unavailable", kind=kind, name=name, namespace=ns)
+                return {}
+            raise
 
     async def get(self, kind: str, name: str, namespace: str | None = None) -> dict | None:
         group, version, plural = RESOURCES[kind]

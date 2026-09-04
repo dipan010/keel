@@ -29,6 +29,59 @@ FATAL_WAITING = {
 UNSCHEDULABLE_GRACE_SECONDS = 120
 
 
+#: Signatures in a container's log tail that name a failure precisely.
+#: A crashlooping pod is accurate but useless to a developer; these turn
+#: "CrashLoopBackOff" into something actionable. Ordered: first match wins.
+LOG_SIGNATURES: list[tuple[str, str, str]] = [
+    (
+        "is greater than the derived max_model_len",
+        "context_too_long",
+        (
+            "the requested context exceeds what the model's config allows. Lower "
+            "max-model-len in the catalog entry to at most the model's "
+            "max_position_embeddings."
+        ),
+    ),
+    (
+        "No available memory for the cache blocks",
+        "kv_cache_too_small",
+        (
+            "no room left for a KV cache after loading weights. Raise "
+            "gpu-memory-utilization, lower max-model-len, or use a larger accelerator."
+        ),
+    ),
+    (
+        "CUDA out of memory",
+        "oom",
+        (
+            "the model did not fit in VRAM. Try a larger accelerator, more GPUs, "
+            "or a shorter max-model-len."
+        ),
+    ),
+    (
+        "Bfloat16 is only supported on GPUs with compute capability",
+        "dtype_unsupported",
+        "this accelerator has no bfloat16. Set dtype: half in the catalog entry.",
+    ),
+    (
+        "does not appear to have a file named config.json",
+        "model_not_found",
+        "the model reference does not resolve. Check the catalog's model id.",
+    ),
+]
+
+
+def classify_log(tail: str) -> tuple[str, str] | None:
+    """Map a container log tail to a precise reason code, or None.
+
+    Verified against vLLM 0.28.0 output captured in bench/colab/.
+    """
+    for needle, code, advice in LOG_SIGNATURES:
+        if needle.lower() in tail.lower():
+            return code, advice
+    return None
+
+
 class Phase(StrEnum):
     SCHEDULING = "scheduling"
     LOADING = "loading"

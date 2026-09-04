@@ -29,6 +29,40 @@ def render(team_slug: str, gpu_quota: int) -> list[dict[str, Any]]:
             "spec": {"hard": {"requests.nvidia.com/gpu": str(gpu_quota)}},
         },
         {
+            # Without this, the KEDA query in manifests.py matches nothing.
+            #
+            # vLLM emits model_name and engine as labels -- never deployment_id.
+            # The relabeling below copies our pod label onto every scraped series,
+            # which is the only reason a per-deployment selector is possible at
+            # all. Verified against vLLM 0.28.0; see the probe results in
+            # bench/colab/.
+            "apiVersion": "monitoring.coreos.com/v1",
+            "kind": "PodMonitor",
+            "metadata": {"name": "keel-vllm", "namespace": ns, "labels": lb},
+            "spec": {
+                "selector": {"matchLabels": {LABEL_MANAGED: MANAGED_BY}},
+                "podMetricsEndpoints": [
+                    {
+                        "port": "http",
+                        "path": "/metrics",
+                        "interval": "15s",
+                        "relabelings": [
+                            {
+                                "sourceLabels": [
+                                    "__meta_kubernetes_pod_label_keel_io_deployment_id"
+                                ],
+                                "targetLabel": "deployment_id",
+                            },
+                            {
+                                "sourceLabels": ["__meta_kubernetes_pod_label_keel_io_team"],
+                                "targetLabel": "team",
+                            },
+                        ],
+                    }
+                ],
+            },
+        },
+        {
             # The Provisioner's write permission is granted per namespace, here,
             # at onboarding. There is deliberately no ClusterRoleBinding for it:
             # that is what keeps invariant I4 ("nothing is created outside

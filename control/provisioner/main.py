@@ -18,7 +18,7 @@ import structlog
 from control import db, gateway, k8s, repo
 from control.domain.rules import namespace
 from control.domain.states import Lane, Mode, Status
-from control.provisioner.status import Phase, classify
+from control.provisioner.status import Phase, classify, classify_log
 from control.render import manifests
 from control.render import namespace as ns_render
 
@@ -87,11 +87,17 @@ async def _wait_for_ready(cluster: k8s.Cluster, dep: dict, started: float) -> No
 
         if outcome.phase is Phase.FAILED:
             detail = dict(outcome.detail)
+            reason, message = outcome.reason_code or "failed", outcome.message or ""
             if pod := detail.get("pod"):
                 # The log tail is what makes the event actionable -- vLLM says
-                # precisely how much memory it wanted.
-                detail["logs"] = await cluster.pod_logs(ns, pod)
-            raise Failed(outcome.reason_code or "failed", outcome.message or "", detail)
+                # precisely what it objected to.
+                tail = await cluster.pod_logs(ns, pod)
+                detail["logs"] = tail
+                # "crashloop" is accurate and useless. If the log names the real
+                # problem, report that instead.
+                if precise := classify_log(tail):
+                    reason, message = precise
+            raise Failed(reason, message, detail)
 
         if outcome.phase is Phase.READY:
             return

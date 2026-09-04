@@ -120,7 +120,7 @@ def _deployment(dep: dict[str, Any], name: str, ns: str, lb: dict[str, str]) -> 
                             "name": "vllm",
                             "image": dep.get("image") or VLLM_IMAGE,
                             "args": args,
-                            "ports": [{"containerPort": VLLM_PORT}],
+                            "ports": [{"name": "http", "containerPort": VLLM_PORT}],
                             **_resources(dep),
                             "volumeMounts": [{"name": "models", "mountPath": "/models"}],
                             "readinessProbe": {
@@ -158,7 +158,7 @@ def _service(name: str, ns: str, lb: dict[str, str]) -> dict[str, Any]:
             # rather than by convention.
             "type": "ClusterIP",
             "selector": {LABEL_DEPLOYMENT: lb[LABEL_DEPLOYMENT]},
-            "ports": [{"port": VLLM_PORT, "targetPort": VLLM_PORT}],
+            "ports": [{"name": "http", "port": VLLM_PORT, "targetPort": VLLM_PORT}],
         },
     }
 
@@ -182,7 +182,18 @@ def _scaled_object(dep: dict[str, Any], name: str, ns: str, lb: dict[str, str]) 
                     "type": "prometheus",
                     "metadata": {
                         "serverAddress": "http://prometheus.keel-system:9090",
-                        "query": f'sum(rate(vllm:request_success_total{{deployment_id="{dep["id"]}"}}[2m]))',
+                        # vllm:request_success_total is real -- verified against
+                        # vLLM 0.28.0 (bench/colab/results-2026-09-01.json).
+                        #
+                        # deployment_id is NOT a label vLLM emits. It exists only
+                        # because the PodMonitor in render/namespace.py relabels the
+                        # pod label onto the series. Without that PodMonitor this
+                        # query matches nothing, KEDA reads zero, and the deployment
+                        # never scales up -- silently.
+                        "query": (
+                            f"sum(rate(vllm:request_success_total"
+                            f'{{deployment_id="{dep["id"]}"}}[2m]))'
+                        ),
                         "threshold": "0.1",
                     },
                 }

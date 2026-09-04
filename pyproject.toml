@@ -39,6 +39,8 @@ packages = ["control"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# Notebooks are Colab artefacts kept for their recorded outputs, not source.
+extend-exclude = ["bench/colab/*.ipynb"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

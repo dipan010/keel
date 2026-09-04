@@ -19,5 +19,14 @@ quantization: null
 license: apache-2.0
 status: preview
 engine_args:
+  dtype: float16               # never leave this to auto -- see below
   max-model-len: 8192          # well under the 32k ceiling; nothing here needs it
   gpu-memory-utilization: 0.60 # leaves room to co-schedule while developing
+
+# dtype is explicit on purpose. vLLM does NOT fail on an unsupported dtype:
+# on a T4 (compute 7.5, no bfloat16) it logs
+#   WARNING Casting torch.bfloat16 to torch.float16
+# and carries on. That is a silent numerics change, not an error -- so in a
+# fleet with mixed accelerators, 'auto' means the same model runs at
+# different precision on different nodes with nothing to show for it.
+# Verified against vLLM 0.28.0; see bench/colab/results-2026-09-01.json.
