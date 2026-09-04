@@ -13,7 +13,7 @@ principle that quietly stops being true.
 | 4     | Gateway wiring                   | `49b8180` |
 | 5     | Reconciler and RBAC              | `ed13f34` |
 | 6     | GPU placement, without a GPU     | `0307145` |
-| 7     | Colab probe: real vLLM findings   | pending   |
+| 7     | Colab probe: real vLLM findings   | `5a5de28` |
 
 Read them in order. Each stage assumes the one before it.
 
