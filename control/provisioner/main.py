@@ -182,6 +182,20 @@ async def teardown(cluster: k8s.Cluster, gw: gateway.Gateway, deployment_id: str
     async with db.pool().connection() as conn:
         dep = await _load(conn, deployment_id)
     ns = namespace(dep["team_slug"])
+
+    # Revoke issued keys before removing anything else. A key that outlives its
+    # deployment is a live credential pointing at nothing -- and if the route is
+    # ever reused, at something it was never meant to reach.
+    async with db.pool().connection() as conn:
+        keys = await repo.active_keys(conn, deployment_id)
+    for k in keys:
+        await gw.revoke_key(k["alias"])
+    if keys:
+        async with db.transaction() as conn:
+            for k in keys:
+                await repo.mark_key_revoked(conn, k["id"], ACTOR)
+        log.info("teardown.keys_revoked", id=deployment_id, count=len(keys))
+
     await gw.deregister(dep["route_name"])
     if Mode(dep["mode"]) is Mode.SELF_HOSTED and dep["k8s_object_name"]:
         # delete() already treats 404 as success, which covers both "already

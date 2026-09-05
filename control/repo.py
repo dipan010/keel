@@ -165,3 +165,41 @@ async def recent_events(conn: Any, dep_id: str, limit: int = 20) -> list[dict[st
         (dep_id, limit),
     )
     return await cur.fetchall()
+
+
+async def insert_key(conn: Any, row: dict[str, Any]) -> None:
+    await conn.execute(
+        """insert into deployment_keys
+             (id, deployment_id, alias, token_hash, masked, max_budget_usd,
+              expires_at, created_by)
+           values (%(id)s, %(deployment_id)s, %(alias)s, %(token_hash)s, %(masked)s,
+                   %(max_budget_usd)s, %(expires_at)s, %(created_by)s)""",
+        row,
+    )
+
+
+async def active_keys(conn: Any, deployment_id: UUID | str) -> list[dict[str, Any]]:
+    cur = await conn.execute(
+        """select * from deployment_keys
+            where deployment_id = %s and revoked_at is null
+            order by created_at""",
+        (deployment_id,),
+    )
+    return await cur.fetchall()
+
+
+async def get_key(conn: Any, deployment_id: UUID | str, key_id: str) -> dict[str, Any] | None:
+    cur = await conn.execute(
+        "select * from deployment_keys where id = %s and deployment_id = %s",
+        (key_id, deployment_id),
+    )
+    return await cur.fetchone()
+
+
+async def mark_key_revoked(conn: Any, key_id: UUID | str, actor: str) -> None:
+    """The row survives revocation. "Who had access, and when" is the question
+    this table exists to answer, and deleting rows destroys it."""
+    await conn.execute(
+        "update deployment_keys set revoked_at = now(), revoked_by = %s where id = %s",
+        (actor, key_id),
+    )

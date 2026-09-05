@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -23,12 +24,26 @@ from control.render import manifests
 
 log = structlog.get_logger()
 
+
+def _stale(queued_at: datetime | None) -> bool:
+    if queued_at is None:
+        return False
+    return (datetime.now(UTC) - queued_at).total_seconds() > STALE_JOB_SECONDS
+
+
 ACTOR = "reconciler"
 INTERVAL = float(os.environ.get("KEEL_RECONCILE_INTERVAL", "60"))
+#: A deployment with an open job is skipped, because the Provisioner owns
+#: it mid-flight. So a job nothing will ever claim disables reconciliation
+#: for that deployment silently and indefinitely -- the failure mode with
+#: no symptom. Past this age, say so.
+STALE_JOB_SECONDS = float(os.environ.get("KEEL_STALE_JOB_SECONDS", "3600"))
 
 DESIRED = """
 select d.*, t.slug as team_slug, c.weights_uri, c.engine_args as catalog_engine_args,
-       exists (select 1 from jobs j where j.deployment_id = d.id) as has_job
+       exists (select 1 from jobs j where j.deployment_id = d.id) as has_job,
+       (select min(j.created_at) from jobs j where j.deployment_id = d.id)
+         as oldest_job_at
   from deployments d
   join teams t on t.id = d.team_id
   join catalog_models c on c.id = d.model_id
@@ -88,7 +103,7 @@ async def _apply(row: dict[str, Any], a: Assessment) -> None:
 
 
 async def reconcile_once(cluster: k8s.Cluster) -> dict[str, int]:
-    counts = {"checked": 0, "skipped": 0, "changed": 0, "orphans": 0}
+    counts = {"checked": 0, "skipped": 0, "changed": 0, "orphans": 0, "stale_jobs": 0}
 
     async with db.pool().connection() as conn:
         cur = await conn.execute(DESIRED)
@@ -112,6 +127,15 @@ async def reconcile_once(cluster: k8s.Cluster) -> dict[str, int]:
         # A deployment the Provisioner is mid-flight on is not ours to judge.
         if row["has_job"] or Status(row["status"]) not in RECONCILABLE:
             counts["skipped"] += 1
+            if row["has_job"] and _stale(row["oldest_job_at"]):
+                counts["stale_jobs"] += 1
+                log.warning(
+                    "reconcile.stale_job",
+                    id=dep_id,
+                    queued_at=str(row["oldest_job_at"]),
+                    detail="this deployment has not been reconciled since; "
+                    "is the Provisioner running?",
+                )
             continue
 
         counts["checked"] += 1
@@ -150,7 +174,7 @@ async def loop() -> None:
         while True:
             try:
                 counts = await reconcile_once(cluster)
-                if counts["changed"] or counts["orphans"]:
+                if counts["changed"] or counts["orphans"] or counts["stale_jobs"]:
                     log.info("reconcile.pass", **counts)
             except Exception:
                 # A reconcile pass must never take the loop down: the next pass

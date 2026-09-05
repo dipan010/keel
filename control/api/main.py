@@ -18,7 +18,7 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 from pydantic import BaseModel, Field
 
-from control import db, repo
+from control import db, gateway, repo
 from control.api.auth import Caller, caller
 from control.api.errors import Conflict, QuotaExceeded
 from control.domain.rules import (
@@ -74,6 +74,31 @@ class EventOut(BaseModel):
 
 class DeploymentDetail(DeploymentOut):
     events: list[EventOut] = []
+
+
+class CreateKey(BaseModel):
+    max_budget_usd: float | None = Field(default=None, gt=0)
+    duration: str | None = Field(default=None, pattern=r"^\d+[smhd]$")
+
+
+class KeyOut(BaseModel):
+    id: str
+    masked: str
+    max_budget_usd: float | None = None
+    expires_at: datetime | None = None
+    created_by: str
+    created_at: datetime
+    revoked_at: datetime | None = None
+
+
+class IssuedKey(KeyOut):
+    """The only response that ever carries the secret.
+
+    It is returned once, at creation, and never stored -- so a caller who loses
+    it issues a new key rather than recovering the old one.
+    """
+
+    key: str
 
 
 def _out(row: dict[str, Any]) -> DeploymentOut:
@@ -305,6 +330,111 @@ async def get(dep_id: str, who: Annotated[Caller, Depends(caller)]) -> Deploymen
             for e in events
         ],
     )
+
+
+def _key_out(row: dict[str, Any]) -> KeyOut:
+    return KeyOut(
+        id=str(row["id"]),
+        masked=row["masked"],
+        max_budget_usd=float(row["max_budget_usd"]) if row["max_budget_usd"] else None,
+        expires_at=row["expires_at"],
+        created_by=row["created_by"],
+        created_at=row["created_at"],
+        revoked_at=row["revoked_at"],
+    )
+
+
+async def _deployment_for(conn: Any, dep_id: str, who: Caller) -> dict[str, Any]:
+    cur = await conn.execute(
+        """select d.*, t.slug as team_slug, t.oidc_group, t.budget_usd_mo
+             from deployments d join teams t on t.id = d.team_id
+            where d.id = %s""",
+        (dep_id,),
+    )
+    row = await cur.fetchone()
+    if row is None or row["oidc_group"] not in who.groups:
+        raise HTTPException(404, "no such deployment")
+    return row
+
+
+@app.post("/v1/deployments/{dep_id}/keys", status_code=201, response_model=IssuedKey)
+async def create_key(
+    dep_id: str,
+    body: CreateKey,
+    who: Annotated[Caller, Depends(caller)],
+) -> IssuedKey:
+    """Issue a key scoped to this deployment alone.
+
+    The secret is in this response and nowhere else. We store the alias, a hash
+    and a masked form -- enough to list and revoke, useless to anyone reading
+    the table.
+    """
+    async with db.pool().connection() as conn:
+        dep = await _deployment_for(conn, dep_id, who)
+
+    if Status(dep["status"]) in {Status.DELETING, Status.DELETED}:
+        raise Conflict("cannot issue a key for a deployment that is being torn down")
+    if not dep["route_name"]:
+        raise Conflict(
+            f"deployment is {dep['status']} and has no route yet; wait for it to be ready"
+        )
+
+    key_id = uuid.uuid4()
+    alias = f"keel-{dep_id}-{key_id.hex[:8]}"
+    # A key must not be able to outspend the team that owns it.
+    budget = body.max_budget_usd
+    if budget is None and dep["budget_usd_mo"] is not None:
+        budget = float(dep["budget_usd_mo"])
+
+    gw = gateway.build()
+    issued = await gw.issue_key(
+        dep["route_name"], alias, budget, body.duration or gateway.DEFAULT_KEY_DURATION
+    )
+
+    row = {
+        "id": key_id,
+        "deployment_id": dep_id,
+        "alias": alias,
+        "token_hash": issued.get("token") or "",
+        "masked": issued.get("key_name") or "sk-...",
+        "max_budget_usd": budget,
+        "expires_at": issued.get("expires"),
+        "created_by": who.sub,
+    }
+    async with db.transaction() as conn:
+        await repo.insert_key(conn, row)
+        stored = await repo.get_key(conn, dep_id, str(key_id))
+
+    assert stored is not None
+    return IssuedKey(**_key_out(stored).model_dump(), key=issued["key"])
+
+
+@app.get("/v1/deployments/{dep_id}/keys", response_model=list[KeyOut])
+async def list_keys(dep_id: str, who: Annotated[Caller, Depends(caller)]) -> list[KeyOut]:
+    """Masked only. The secret is unrecoverable by design."""
+    async with db.pool().connection() as conn:
+        await _deployment_for(conn, dep_id, who)
+        return [_key_out(r) for r in await repo.active_keys(conn, dep_id)]
+
+
+@app.delete("/v1/deployments/{dep_id}/keys/{key_id}", status_code=204)
+async def revoke_key(dep_id: str, key_id: str, who: Annotated[Caller, Depends(caller)]) -> Response:
+    async with db.pool().connection() as conn:
+        await _deployment_for(conn, dep_id, who)
+        row = await repo.get_key(conn, dep_id, key_id)
+
+    if row is None:
+        raise HTTPException(404, "no such key")
+    if row["revoked_at"] is not None:
+        # Already gone. Idempotent: a retry must not error.
+        return Response(status_code=204)
+
+    # Revoke at the gateway FIRST. If the order were reversed and the gateway
+    # call failed, the record would say revoked while the key still worked.
+    await gateway.build().revoke_key(row["alias"])
+    async with db.transaction() as conn:
+        await repo.mark_key_revoked(conn, key_id, who.sub)
+    return Response(status_code=204)
 
 
 def run() -> None:

@@ -112,6 +112,8 @@ Things a code review should reject a change for violating.
    (1, 4 and 5 are enforced by the API server, not by convention --
    `deploy/rbac.yaml`, asserted in `control/tests/test_rbac.py`.)
 6. Every state transition writes an event. Status is a projection of that log.
+7. An issued key's secret exists in exactly one HTTP response and nowhere
+   else -- not in the database, not in a log, not recoverable by listing.
 
 ## Phase 1
 

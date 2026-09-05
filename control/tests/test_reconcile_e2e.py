@@ -212,3 +212,43 @@ async def test_transient_states_are_not_reconciled(catalog_entry, team):
         assert await _status(dep_id) == "loading"
     finally:
         await cluster.close()
+
+
+async def test_a_stale_job_is_reported_not_silently_skipped(catalog_entry, team, caplog):
+    """The failure mode with no symptom.
+
+    A deployment with an open job is skipped, correctly, because the Provisioner
+    owns it. But a job nothing will ever claim disables reconciliation for that
+    deployment indefinitely -- and nothing said so until now.
+    """
+    dep_id, _ = await _seed(team)
+    async with db.transaction() as conn:
+        await conn.execute(
+            """insert into jobs (deployment_id, kind, created_at)
+               values (%s, 'provision', now() - interval '3 hours')""",
+            (dep_id,),
+        )
+    await k8s.load()
+    cluster = k8s.Cluster()
+    try:
+        counts = await reconcile_once(cluster)
+        assert counts["stale_jobs"] >= 1
+        # Still skipped -- we do not start fighting the Provisioner over it.
+        assert await _status(dep_id) == Status.READY.value
+    finally:
+        await cluster.close()
+
+
+async def test_a_fresh_job_is_skipped_quietly(catalog_entry, team):
+    """Normal in-flight work must not page anyone."""
+    dep_id, _ = await _seed(team)
+    async with db.transaction() as conn:
+        await conn.execute(
+            "insert into jobs (deployment_id, kind) values (%s, 'provision')", (dep_id,)
+        )
+    await k8s.load()
+    cluster = k8s.Cluster()
+    try:
+        assert (await reconcile_once(cluster))["stale_jobs"] == 0
+    finally:
+        await cluster.close()

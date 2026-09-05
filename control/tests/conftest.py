@@ -83,6 +83,18 @@ async def team():
             (slug,),
         )
         await conn.execute(
+            """delete from deployment_keys where deployment_id in
+                 (select id from deployments where team_id =
+                   (select id from teams where slug = %s))""",
+            (slug,),
+        )
+        await conn.execute(
+            """delete from deployment_metrics where deployment_id in
+                 (select id from deployments where team_id =
+                   (select id from teams where slug = %s))""",
+            (slug,),
+        )
+        await conn.execute(
             """delete from jobs where deployment_id in
                  (select id from deployments where team_id =
                    (select id from teams where slug = %s))""",

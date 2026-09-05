@@ -14,7 +14,7 @@ restart into a total inference outage.
 from __future__ import annotations
 
 import os
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 import structlog
@@ -25,10 +25,20 @@ GATEWAY_URL = os.environ.get("KEEL_GATEWAY_URL", "")
 GATEWAY_KEY = os.environ.get("KEEL_GATEWAY_KEY", "")
 
 
+#: Issued keys expire by default. A key that never expires is a liability
+#: nobody remembers creating; renewing one is a smaller cost than an
+#: indefinitely valid credential in a CI config somebody left a job ago.
+DEFAULT_KEY_DURATION = os.environ.get("KEEL_KEY_DURATION", "90d")
+
+
 class Gateway(Protocol):
     async def register(self, route: str, upstream: str, model: str) -> None: ...
     async def deregister(self, route: str) -> None: ...
     async def completion(self, route: str, prompt: str) -> str: ...
+    async def issue_key(
+        self, route: str, alias: str, max_budget: float | None, duration: str | None
+    ) -> dict[str, Any]: ...
+    async def revoke_key(self, alias: str) -> None: ...
 
 
 class NullGateway:
@@ -46,6 +56,16 @@ class NullGateway:
 
     async def completion(self, route: str, prompt: str) -> str:
         raise RuntimeError("no gateway configured; set KEEL_GATEWAY_URL")
+
+    async def issue_key(
+        self, route: str, alias: str, max_budget: float | None, duration: str | None
+    ) -> dict[str, Any]:
+        # Cannot be faked: a key that does not work at the gateway is worse than
+        # an error, because the caller only finds out at first use.
+        raise RuntimeError("no gateway configured; cannot issue a key")
+
+    async def revoke_key(self, alias: str) -> None:
+        log.warning("gateway.absent.revoke", alias=alias)
 
 
 class LiteLLMGateway:
@@ -114,6 +134,37 @@ class LiteLLMGateway:
             )
             r.raise_for_status()
             return r.json()["choices"][0]["message"]["content"]
+
+    async def issue_key(
+        self, route: str, alias: str, max_budget: float | None, duration: str | None
+    ) -> dict[str, Any]:
+        """Generate a key scoped to ONE route.
+
+        `models` is the scoping mechanism: a key issued for one deployment
+        cannot call another, which is what makes per-deployment keys meaningful
+        rather than decorative.
+
+        The returned dict contains the secret exactly once. It is handed to the
+        caller and never stored -- see migration 0005.
+        """
+        body: dict[str, Any] = {"key_alias": alias, "models": [route]}
+        if max_budget is not None:
+            body["max_budget"] = float(max_budget)
+        if duration:
+            body["duration"] = duration
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(f"{self._base}/key/generate", headers=self._headers, json=body)
+            r.raise_for_status()
+            return r.json()
+
+    async def revoke_key(self, alias: str) -> None:
+        """Revoking an absent key is a no-op: teardown must be safe to retry."""
+        async with httpx.AsyncClient(timeout=30) as c:
+            r = await c.post(
+                f"{self._base}/key/delete", headers=self._headers, json={"key_aliases": [alias]}
+            )
+            if r.status_code not in (200, 404):
+                r.raise_for_status()
 
 
 def build() -> Gateway:

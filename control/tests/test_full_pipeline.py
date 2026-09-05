@@ -95,10 +95,18 @@ async def test_request_to_completion(client, catalog_entry, team, monkeypatch):
     gw = gateway.build()
     assert isinstance(gw, gateway.LiteLLMGateway), "test needs the real gateway"
     try:
+        # Claim this deployment's job specifically. Claiming whichever is
+        # oldest makes the test depend on an empty queue, which it has no right
+        # to assume. SKIP LOCKED itself is covered in test_api_delete.
         async with db.transaction() as conn:
-            job = await db.claim_job(conn)
+            cur = await conn.execute(
+                """update jobs set locked_until = now() + interval '15 minutes'
+                    where deployment_id = %s
+                returning id, deployment_id, kind, attempts""",
+                (dep_id,),
+            )
+            job = await cur.fetchone()
         assert job is not None, "create did not enqueue a job"
-        assert str(job["deployment_id"]) == dep_id
 
         await asyncio.wait_for(provisioner.run_job(cluster, gw, job), timeout=300)
 
@@ -124,6 +132,41 @@ async def test_request_to_completion(client, catalog_entry, team, monkeypatch):
             )
         assert resp.status_code == 200, resp.text
         assert resp.json()["choices"][0]["message"]["content"]
+
+        # 4b. a key issued through the API works on its own route and nowhere
+        #     else. The unit tests use a fake gateway; this is the only place
+        #     the real one is exercised.
+        issued = await client.post(f"/v1/deployments/{dep_id}/keys", json={"max_budget_usd": 5})
+        assert issued.status_code == 201, issued.text
+        secret = issued.json()["key"]
+        assert issued.json()["masked"].startswith("sk-...")
+
+        async with httpx.AsyncClient(timeout=60) as c:
+            allowed = await c.post(
+                f"{GATEWAY_URL}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {secret}"},
+                json={
+                    "model": route,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 8,
+                },
+            )
+        assert allowed.status_code == 200, allowed.text
+
+        # Revoking must actually stop it, not merely update our record.
+        key_id = issued.json()["id"]
+        assert (await client.delete(f"/v1/deployments/{dep_id}/keys/{key_id}")).status_code == 204
+        async with httpx.AsyncClient(timeout=60) as c:
+            denied = await c.post(
+                f"{GATEWAY_URL}/v1/chat/completions",
+                headers={"Authorization": f"Bearer {secret}"},
+                json={
+                    "model": route,
+                    "messages": [{"role": "user", "content": "hi"}],
+                    "max_tokens": 8,
+                },
+            )
+        assert denied.status_code != 200, "a revoked key still worked"
 
         # 5. and the job is gone, so nothing re-runs it
         async with db.pool().connection() as conn:
