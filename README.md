@@ -29,6 +29,7 @@ control/
   api/          only writer of desired state; no cluster access at all
   provisioner/  queue worker: render -> server-side apply -> smoke test
   reconciler/   desired vs actual, every 60s; read-only by construction
+  metrics/      hourly rollup into deployment_metrics; cost computed here
   render/       deployment row -> manifests. The seam for a second backend.
   domain/       state machine and rules. NO infrastructure imports (enforced).
   migrations/   0001_init.sql ships mode_t from day one
@@ -64,6 +65,7 @@ database, so `make test` works on a laptop with nothing running.
 ```bash
 make cluster     # local k3d cluster
 make rbac        # service accounts and roles
+make monitoring  # prometheus, with the relabeling the design depends on
 make fake-gpu    # a node that claims a GPU it does not have
 make gateway     # litellm + its own database
 make fake        # build the fake vLLM and load it in

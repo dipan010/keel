@@ -35,6 +35,16 @@ provisioner:  ## run the queue worker
 reconciler:   ## run the reconcile loop
 	uv run python -m control.reconciler.main
 
+rollup:       ## run the hourly metrics rollup (needs prometheus-fwd)
+	uv run python -m control.metrics.rollup
+
+monitoring:   ## deploy prometheus with the keel relabeling
+	kubectl apply -f deploy/monitoring/prometheus.yaml
+	kubectl rollout status deploy/prometheus -n keel-system --timeout=180s
+
+prom-fwd:     ## port-forward prometheus to localhost:9090
+	kubectl port-forward -n keel-system svc/prometheus 9090:9090
+
 test:         ## all tests; db and cluster suites skip if absent
 	uv run pytest -q
 

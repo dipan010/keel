@@ -87,17 +87,31 @@ def render(team_slug: str, gpu_quota: int) -> list[dict[str, Any]]:
             "spec": {
                 "podSelector": {},
                 "policyTypes": ["Ingress"],
-                # Only the gateway may reach a team's workloads. A developer who
-                # learns a Service DNS name still cannot call it, and one team
-                # cannot reach another's.
+                # Only the gateway and the control plane may reach a team's
+                # workloads. A developer who learns a Service DNS name still
+                # cannot call it, and one team cannot reach another's.
+                #
+                # keel-system is here because Prometheus scrapes /metrics, and
+                # vLLM serves metrics on the SAME port as the inference API --
+                # so this cannot be narrowed to a metrics-only port. It does
+                # therefore grant the control plane API access to every model.
+                # Accepted knowingly: keel-system holds only our own components,
+                # and the alternative was no telemetry at all. Revisit if a
+                # metrics sidecar on a separate port becomes worthwhile.
+                #
+                # Found by running it: with only the gateway allowed, every
+                # scrape failed and deployment_metrics stayed empty. The
+                # relabeling was correct the whole time; nothing could reach the
+                # pod to be relabeled.
                 "ingress": [
                     {
                         "from": [
                             {
                                 "namespaceSelector": {
-                                    "matchLabels": {"kubernetes.io/metadata.name": GATEWAY_NS}
+                                    "matchLabels": {"kubernetes.io/metadata.name": ns_name}
                                 }
                             }
+                            for ns_name in (GATEWAY_NS, CONTROL_NS)
                         ]
                     }
                 ],

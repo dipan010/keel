@@ -28,6 +28,7 @@ dev = [
 keel-api         = "control.api.main:run"
 keel-provisioner = "control.provisioner.main:run"
 keel-reconciler  = "control.reconciler.main:run"
+keel-rollup      = "control.metrics.rollup:run"
 
 [build-system]
 requires = ["hatchling"]

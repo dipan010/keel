@@ -1,0 +1,105 @@
+# Prometheus, without the operator.
+#
+# render/namespace.py also emits a PodMonitor, which is the right interface on a
+# cluster that runs prometheus-operator. This scrape config does the same job
+# for a cluster that does not -- the same relabeling, expressed directly.
+#
+# Both paths exist because the relabeling is the load-bearing part: vLLM emits
+# model_name and engine as labels, never deployment_id. Without copying our pod
+# labels onto every series, no per-deployment query is possible at all, and the
+# KEDA trigger in render/manifests.py matches nothing.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: keel-system
+  labels: {app.kubernetes.io/managed-by: keel}
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+    scrape_configs:
+      - job_name: keel-vllm
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          # Only our workloads.
+          - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_managed_by]
+            action: keep
+            regex: keel
+          # Only the port vLLM serves metrics on.
+          - source_labels: [__meta_kubernetes_pod_container_port_name]
+            action: keep
+            regex: http
+          # The labels the whole design depends on.
+          - source_labels: [__meta_kubernetes_pod_label_keel_io_deployment_id]
+            target_label: deployment_id
+          - source_labels: [__meta_kubernetes_pod_label_keel_io_team]
+            target_label: team
+          - source_labels: [__meta_kubernetes_namespace]
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            target_label: pod
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata: {name: prometheus, namespace: keel-system}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata: {name: keel-prometheus}
+rules:
+  - apiGroups: [""]
+    resources: [pods, services, endpoints, nodes, nodes/metrics]
+    verbs: [get, list, watch]
+  - nonResourceURLs: ["/metrics"]
+    verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata: {name: keel-prometheus}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: keel-prometheus}
+subjects: [{kind: ServiceAccount, name: prometheus, namespace: keel-system}]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: keel-system
+  labels: {app.kubernetes.io/managed-by: keel, app: prometheus}
+spec:
+  replicas: 1
+  selector: {matchLabels: {app: prometheus}}
+  template:
+    metadata:
+      labels: {app: prometheus}
+    spec:
+      serviceAccountName: prometheus
+      containers:
+        - name: prometheus
+          image: prom/prometheus:v3.1.0
+          args:
+            - --config.file=/etc/prometheus/prometheus.yml
+            - --storage.tsdb.retention.time=15d
+          ports: [{name: web, containerPort: 9090}]
+          volumeMounts:
+            - {name: config, mountPath: /etc/prometheus}
+            - {name: data, mountPath: /prometheus}
+          readinessProbe:
+            httpGet: {path: /-/ready, port: 9090}
+            initialDelaySeconds: 5
+      volumes:
+        - {name: config, configMap: {name: prometheus-config}}
+        # Development only. Real deployments need a PVC: 15 days of retention
+        # in an emptyDir is 15 days of data lost on the next reschedule.
+        - {name: data, emptyDir: {}}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: keel-system
+  labels: {app.kubernetes.io/managed-by: keel}
+spec:
+  selector: {app: prometheus}
+  ports: [{name: web, port: 9090, targetPort: 9090}]
