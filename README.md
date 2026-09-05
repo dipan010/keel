@@ -85,6 +85,11 @@ extended-resource mechanism. That validates **placement** -- node selector,
 toleration, resource limits, quota, and the unschedulable path -- with no
 hardware. It says nothing about whether a model runs on a GPU.
 
+`make ci` runs exactly what CI runs. Authentication is OIDC: set
+`KEEL_OIDC_ISSUER` (and `KEEL_OIDC_AUDIENCE`) to verify against a real IdP,
+or `KEEL_DEV_AUTH=1` locally. With neither, every request gets a 501 that
+says so -- a permissive default is how a service ships unauthenticated.
+
 Four test tiers, each skipping cleanly when its dependency is absent:
 `test-unit` needs nothing, the database suite needs Postgres, the cluster suite
 needs an API server, and `test_full_pipeline.py` needs all three plus a gateway

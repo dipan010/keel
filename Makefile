@@ -48,9 +48,20 @@ prom-fwd:     ## port-forward prometheus to localhost:9090
 test:         ## all tests; db and cluster suites skip if absent
 	uv run pytest -q
 
+ci:           ## exactly what CI runs, in the same three tiers
+	uv run ruff check . && uv run ruff format --check .
+	$(MAKE) test-unit
+	uv run pytest -q control/tests/test_api_create.py control/tests/test_api_delete.py \
+	  control/tests/test_api_keys.py
+	uv run pytest -q control/tests/test_provision_e2e.py control/tests/test_rbac.py \
+	  control/tests/test_gpu_scheduling_e2e.py
+
 test-unit:    ## domain only -- needs nothing at all
 	uv run pytest -q control/tests/test_states.py control/tests/test_rules.py \
-	  control/tests/test_status.py control/tests/test_no_infra_imports.py
+	  control/tests/test_status.py control/tests/test_reconcile.py \
+	  control/tests/test_auth.py control/tests/test_rollup.py \
+	  control/tests/test_log_signatures.py control/tests/test_metrics_contract.py \
+	  control/tests/test_no_infra_imports.py
 
 lint:
 	uv run ruff check . && uv run ruff format --check .

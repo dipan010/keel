@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 from datetime import UTC, datetime, timedelta
 
 import httpx
@@ -140,12 +141,16 @@ def test_every_query_uses_a_metric_the_probe_observed():
 # ---------- integration ----------
 
 
-def _prom_up() -> bool:
-    import os
+# One source of truth. rollup.PROM defaults to the in-cluster DNS name, which
+# does not resolve from a laptop -- so probing one URL and querying another made
+# this test fail instead of skip, with a DNS error that looked nothing like
+# "Prometheus is not running".
+PROM_URL = os.environ.get("KEEL_PROMETHEUS_URL", "http://localhost:9090")
 
-    url = os.environ.get("KEEL_PROMETHEUS_URL", "http://localhost:9090")
+
+def _prom_up() -> bool:
     try:
-        return httpx.get(f"{url}/-/ready", timeout=2).status_code == 200
+        return httpx.get(f"{PROM_URL}/-/ready", timeout=2).status_code == 200
     except httpx.HTTPError:
         return False
 
@@ -157,16 +162,14 @@ requires_prometheus = pytest.mark.skipif(
 
 
 @requires_prometheus
-async def test_queries_are_accepted_by_a_real_prometheus():
+async def test_queries_are_accepted_by_a_real_prometheus(monkeypatch):
     """Syntax and label-grouping, checked by the server rather than by eye.
 
     A malformed histogram_quantile or a missing `by (le)` returns an error or
     silently nothing, and either way the corpus stays empty without any test
     failing.
     """
-    import os
-
-    os.environ.setdefault("KEEL_PROMETHEUS_URL", "http://localhost:9090")
+    monkeypatch.setattr(rollup, "PROM", PROM_URL)
     async with httpx.AsyncClient() as c:
         for name, expr in rollup.QUERIES.items():
             # Raises if Prometheus rejects it; an empty result is fine here,

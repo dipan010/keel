@@ -1,0 +1,91 @@
+name: ci
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  # Tier 1: needs nothing. Fast, and catches most regressions.
+  unit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: {enable-cache: true}
+      - run: uv sync --extra dev
+      - run: uv run ruff check .
+      - run: uv run ruff format --check .
+      - name: domain, rules, status, reconcile, auth, rollup, contracts
+        run: |
+          uv run pytest -q \
+            control/tests/test_states.py \
+            control/tests/test_rules.py \
+            control/tests/test_status.py \
+            control/tests/test_reconcile.py \
+            control/tests/test_auth.py \
+            control/tests/test_rollup.py \
+            control/tests/test_log_signatures.py \
+            control/tests/test_metrics_contract.py \
+            control/tests/test_no_infra_imports.py
+
+  # Tier 2: needs Postgres. Migrations are applied in order, so a migration
+  # that only works against a hand-patched local database fails here.
+  database:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: keel
+          POSTGRES_PASSWORD: keel
+          POSTGRES_DB: keel
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U keel"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      KEEL_DSN: postgresql://keel:keel@localhost:5432/keel
+      KEEL_DEV_AUTH: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: {enable-cache: true}
+      - run: uv sync --extra dev
+      - name: apply migrations in order
+        run: |
+          for f in control/migrations/*.sql; do
+            echo "applying $f"
+            psql "$KEEL_DSN" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+      - run: uv run python -m control.catalog_sync
+      - run: uv run pytest -q control/tests/test_api_create.py control/tests/test_api_delete.py
+                            control/tests/test_api_keys.py
+
+  # Tier 3: needs a cluster. The manifests and the server-side-apply path only
+  # break in contact with a real API server, which is where the bugs have been.
+  cluster:
+    runs-on: ubuntu-latest
+    env:
+      KEEL_RUNTIME_IMAGE: keel/fake-runtime:dev
+      KEEL_READY_DELAY: "2"
+      KEEL_DEV_AUTH: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: {enable-cache: true}
+      - run: uv sync --extra dev
+      - uses: AbsaOSS/k3d-action@v2
+        with:
+          cluster-name: keel
+          args: --agents 1 --wait
+      - name: build and load the fake runtime
+        run: |
+          docker build -t keel/fake-runtime:dev bench/fake-runtime
+          k3d image import keel/fake-runtime:dev -c keel
+      - run: kubectl apply -f deploy/kind/namespaces.yaml -f deploy/rbac.yaml
+      - name: advertise a GPU that does not exist
+        run: CLUSTER=keel ./deploy/kind/fake-gpu.sh
+      - run: uv run pytest -q control/tests/test_provision_e2e.py
+                            control/tests/test_rbac.py
+                            control/tests/test_gpu_scheduling_e2e.py
