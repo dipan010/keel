@@ -1,0 +1,169 @@
+================================================================================
+STAGE 8 -- CLOSING THE LOOP: TEARDOWN AND TELEMETRY
+================================================================================
+
+WHAT THIS STAGE PRODUCES
+    Two phase-1 items that had been written down and never built: deployments
+    can now be removed, and deployment_metrics actually receives rows.
+
+    Both were "already done" in a superficial sense -- teardown() existed, the
+    metrics schema existed -- which is exactly why they had gone unnoticed.
+
+--------------------------------------------------------------------------------
+PART A -- DELETE
+--------------------------------------------------------------------------------
+THE GAP
+    The Provisioner had teardown() and HANDLERS["delete"] since stage 3. The
+    API had no DELETE endpoint, so nothing ever enqueued that job and the code
+    had never executed once. Deployments could be created and not removed.
+    Every test run leaked a namespace; a real team would have leaked GPUs.
+
+    An audit of endpoints against the phase-1 scope is what surfaced it. It
+    would not have shown up in any test, because the tests only exercised paths
+    that existed.
+
+THREE THINGS BEYOND THE ENDPOINT
+
+ 1. VALIDATING could not transition to DELETING. A deployment caught mid-
+    validation was undeletable. Deleting has to be reachable from every
+    non-terminal state, and the transition table said otherwise.
+    control/domain/states.py
+
+ 2. teardown() wrapped its cluster deletes in contextlib.suppress(Exception).
+    That would have marked a deployment deleted while its workload kept running
+    and billing -- the worst possible outcome, since the record says the money
+    stopped. delete() already treats 404 as success, covering both "already
+    gone" and "this kind is not installed", so everything else must surface and
+    let the job retry.
+    control/provisioner/main.py
+
+ 3. Queued-but-unclaimed work is cancelled when a teardown is requested --
+    provisioning something we are about to destroy wastes a GPU. Work the
+    Provisioner already HOLDS keeps its lock and finishes, because killing a
+    run mid-flight leaves half-created objects with nothing tracking them.
+    control/repo.py  cancel_pending_jobs()
+
+A BUG THE TESTS FOUND -- MIGRATION 0004
+    Delete is soft: the row and its events survive, because "why did this
+    endpoint disappear" has to stay answerable afterwards.
+
+    But uniq_name and the route_name unique were UNCONDITIONAL, while
+    name_taken() filtered on status <> 'deleted'. The two disagreed about what
+    "taken" means: the API would report a name as free, then the insert would
+    fail with a constraint violation and a 500. A name could never be reused
+    after a teardown.
+
+    Both are now partial unique indexes over live rows. uniq_idem is
+    deliberately left unconditional -- a used idempotency key stays used, so a
+    replay after teardown returns the original outcome rather than quietly
+    creating a second deployment.
+
+--------------------------------------------------------------------------------
+PART B -- TELEMETRY
+--------------------------------------------------------------------------------
+THE GAP
+    "Instrumented from the first deployment, because it cannot be backfilled"
+    appears in section 3.5, in three ADRs, and in several commit messages.
+
+    deployment_metrics had ZERO ROWS. The schema was there, the metric names
+    had been verified against a real vLLM in stage 7, the PodMonitor was being
+    rendered -- and nothing scraped, nothing aggregated. The argument had been
+    made repeatedly and never acted on.
+
+    This was the only outstanding item where delay destroyed something: every
+    hour of running deployments was an hour the future estimator would have to
+    re-earn on rented hardware.
+
+CONCEPT -- RELABELING IS THE LOAD-BEARING PART
+    vLLM emits model_name and engine as labels. It never emits deployment_id.
+    Without copying our pod labels onto every scraped series, no per-deployment
+    query is possible at all -- and the KEDA trigger matches nothing.
+
+    Two paths now exist for the same relabeling:
+      render/namespace.py           PodMonitor -- correct where
+                                    prometheus-operator runs
+      deploy/monitoring/prometheus.yaml
+                                    a scrape config doing the same thing where
+                                    it does not
+
+    The duplication is deliberate and documented. OPTIONAL_KINDS (stage 7)
+    means the PodMonitor is skipped with a warning on a cluster without the
+    operator, which is exactly what happened here.
+
+FOUND BY RUNNING IT -- THE NETWORKPOLICY COLLISION
+    Every scrape failed. The target showed health=down, connection refused,
+    while the deployment_id label was present and correct the whole time.
+
+    Cause: the per-namespace NetworkPolicy allowed ingress only from
+    keel-gateway. That is correct for invariant I1 -- only the gateway may
+    reach a team's workloads -- and it blocks Prometheus in keel-system.
+
+    Two invariants collided: "backends are unreachable except through the
+    gateway" and "telemetry is captured from day one".
+
+    Resolved by allowing keel-system as well. It CANNOT be narrowed to a
+    metrics-only port, because vLLM serves /metrics on the same port as the
+    inference API. So this does grant the control plane API access to every
+    model. Accepted knowingly: keel-system holds only our own components, and
+    the alternative was no telemetry. Written into the manifest as a comment so
+    nobody "tightens" it back without knowing what breaks.
+
+    Worth noting how close this came to passing silently: the earlier traffic
+    generator used `curl -s -o /dev/null` in a loop and printed "sent"
+    regardless of whether a single request succeeded. It had never worked.
+
+THE FAKE RUNTIME HAD TO BECOME HONEST
+    It previously emitted three metric names that do not exist and no histogram
+    buckets at all. A fake whose interface differs from the real thing tests
+    nothing -- the rollup would have passed against it and failed in
+    production. It now emits the names verified in stage 7, with real
+    _bucket/_count/_sum shapes so quantile queries work.
+
+COST IS COMPUTED, NOT SCRAPED
+    gpu_seconds comes from our own record: we placed the pod and know the node,
+    so both terms are exactly knowable. That is what makes cost live rather
+    than lagging (ADR-0006).
+
+    Deliberate choices:
+      - unknown accelerators price at ZERO, not at a guess. A fabricated rate
+        would put an invented number in front of a spending decision; zero is
+        visibly wrong and prompts the question.
+      - gpu_util_pct stays NULL. Real utilisation needs the DCGM exporter,
+        which is not deployed. Writing KV-cache occupancy under that name would
+        be a wrong number wearing a familiar label.
+      - replicas_min is used for the replica count, so a deployment that scaled
+        up during the window is understated. Recorded as a known limitation
+        rather than papered over.
+
+--------------------------------------------------------------------------------
+VERIFIED END TO END
+--------------------------------------------------------------------------------
+    Against a real Prometheus scraping a real pod:
+
+      requests        9
+      tokens_in       112
+      tokens_out      413
+      ttft_p50_ms     312
+      ttft_p95_ms     925
+      tpot_p50_ms     31
+      gpu_util_pct    None          (no DCGM -- correct)
+      gpu_seconds     3600
+      cost_usd        0.7000        (l4 x 1 GPU x 1h, matching the table)
+
+--------------------------------------------------------------------------------
+VERIFY
+--------------------------------------------------------------------------------
+    make db migrate cluster rbac monitoring fake
+    make prom-fwd                      # separate shell
+    uv run pytest control/tests/test_rollup.py control/tests/test_api_delete.py -q
+
+--------------------------------------------------------------------------------
+STILL OPEN AFTER THIS STAGE
+--------------------------------------------------------------------------------
+    - key issuance      POST /v1/deployments/{id}/keys -- without it a
+                        deployment is either wide open or unusable
+    - OIDC              auth.py still returns 501; KEEL_DEV_AUTH=1 required, so
+                        this runs nowhere but a laptop
+    - docs/baseline.md  seven empty rows; needs one rented GPU hour and no code
+    - DCGM              for real gpu_util_pct
+    - no CI, no remote

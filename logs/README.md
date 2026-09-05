@@ -14,6 +14,7 @@ principle that quietly stops being true.
 | 5     | Reconciler and RBAC              | `ed13f34` |
 | 6     | GPU placement, without a GPU     | `0307145` |
 | 7     | Colab probe: real vLLM findings   | `2dc8e18` |
+| 8     | Teardown and telemetry            | `21e643b`, `a2d560d` |
 
 Read them in order. Each stage assumes the one before it.
 
