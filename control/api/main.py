@@ -29,7 +29,7 @@ from control.domain.rules import (
     route_name,
     validate,
 )
-from control.domain.states import Lane, Mode, Status
+from control.domain.states import IllegalTransition, Lane, Mode, Status, assert_transition
 
 
 @asynccontextmanager
@@ -229,6 +229,50 @@ async def list_deployments(
             (list(who.groups), team, team),
         )
         return [_out(r) for r in await cur.fetchall()]
+
+
+@app.delete("/v1/deployments/{dep_id}", status_code=202, response_model=DeploymentOut)
+async def delete(dep_id: str, who: Annotated[Caller, Depends(caller)]) -> DeploymentOut:
+    """Record the intent to tear down and enqueue it. Never blocks.
+
+    Soft delete: the row survives and so do its events, because "why did this
+    endpoint disappear" has to stay answerable after the workload is gone.
+    """
+    async with db.transaction() as conn:
+        cur = await conn.execute(
+            """select d.*, t.slug as team_slug, t.oidc_group
+                 from deployments d join teams t on t.id = d.team_id
+                where d.id = %s for update of d""",
+            (dep_id,),
+        )
+        row = await cur.fetchone()
+        if row is None or row["oidc_group"] not in who.groups:
+            raise HTTPException(404, "no such deployment")
+
+        current = Status(row["status"])
+        if current is Status.DELETED:
+            raise HTTPException(404, "no such deployment")
+        # Already on its way out: report the state rather than queueing a
+        # second teardown. A client retrying after a timeout must not stack
+        # jobs.
+        if current is Status.DELETING:
+            return _out(row)
+
+        try:
+            assert_transition(current, Status.DELETING)
+        except IllegalTransition as exc:
+            raise Conflict(f"cannot delete a deployment that is {current}") from exc
+
+        # Queued-but-unclaimed work for this deployment is now pointless.
+        await repo.cancel_pending_jobs(conn, dep_id)
+        await repo.record_transition(conn, dep_id, current, Status.DELETING, who.sub)
+        await repo.enqueue(conn, dep_id, "delete")
+
+        team_slug = row["team_slug"]
+        row = await repo.get_deployment(conn, dep_id)
+
+    assert row is not None
+    return _out({**row, "team_slug": team_slug})
 
 
 @app.get("/v1/deployments/{dep_id}", response_model=DeploymentDetail)

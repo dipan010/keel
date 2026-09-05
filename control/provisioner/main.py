@@ -8,7 +8,6 @@ architecture doc for the ladder this implements.
 from __future__ import annotations
 
 import asyncio
-import contextlib
 import os
 import time
 from typing import Any
@@ -185,9 +184,13 @@ async def teardown(cluster: k8s.Cluster, gw: gateway.Gateway, deployment_id: str
     ns = namespace(dep["team_slug"])
     await gw.deregister(dep["route_name"])
     if Mode(dep["mode"]) is Mode.SELF_HOSTED and dep["k8s_object_name"]:
+        # delete() already treats 404 as success, which covers both "already
+        # gone" and "this kind is not installed". Anything else -- a permissions
+        # error, an unreachable API server -- must surface, so the job is
+        # retried rather than the deployment being marked deleted while its
+        # workload keeps running and billing.
         for kind in ("ScaledObject", "Service", "Deployment"):
-            with contextlib.suppress(Exception):
-                await cluster.delete(kind, dep["k8s_object_name"], ns)
+            await cluster.delete(kind, dep["k8s_object_name"], ns)
     await _transition(str(dep["id"]), Status.DELETING, Status.DELETED)
 
 

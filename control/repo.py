@@ -130,6 +130,20 @@ async def record_transition(
     )
 
 
+async def cancel_pending_jobs(conn: Any, deployment_id: UUID | str) -> int:
+    """Drop queued-but-unclaimed work for a deployment.
+
+    Only unlocked rows: a job the Provisioner is already running keeps its lock
+    and finishes, and the teardown queues behind it. Killing an in-flight
+    provision would leave half-created objects with nothing tracking them.
+    """
+    cur = await conn.execute(
+        "delete from jobs where deployment_id = %s and locked_until is null",
+        (deployment_id,),
+    )
+    return cur.rowcount
+
+
 async def enqueue(conn: Any, deployment_id: UUID | str, kind: str) -> None:
     await conn.execute(
         "insert into jobs (deployment_id, kind) values (%s, %s)",

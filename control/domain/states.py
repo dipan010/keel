@@ -42,7 +42,7 @@ class Status(StrEnum):
 #: Allowed transitions. Anything absent here is a bug, not a state to handle.
 TRANSITIONS: dict[Status, frozenset[Status]] = {
     Status.REQUESTED: frozenset({Status.VALIDATING, Status.FAILED, Status.DELETING}),
-    Status.VALIDATING: frozenset({Status.SCHEDULING, Status.READY, Status.FAILED}),
+    Status.VALIDATING: frozenset({Status.SCHEDULING, Status.READY, Status.FAILED, Status.DELETING}),
     #                                              ^ upstream skips the workload states
     Status.SCHEDULING: frozenset({Status.LOADING, Status.FAILED, Status.DELETING}),
     Status.LOADING: frozenset({Status.READY, Status.FAILED, Status.DELETING}),

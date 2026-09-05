@@ -32,8 +32,10 @@ def test_the_real_config_validation_error_is_recognised():
         ("ValueError: No available memory for the cache blocks.", "kv_cache_too_small"),
         ("torch.OutOfMemoryError: CUDA out of memory. Tried to allocate 2.00 GiB", "oom"),
         (
-            "ValueError: Bfloat16 is only supported on GPUs with compute capability "
-            "of at least 8.0. Your Tesla T4 GPU has compute capability 7.5.",
+            (
+                "ValueError: Bfloat16 is only supported on GPUs with compute capability "
+                "of at least 8.0. Your Tesla T4 GPU has compute capability 7.5."
+            ),
             "dtype_unsupported",
         ),
         (

@@ -18,8 +18,15 @@ RESULTS = pathlib.Path(__file__).resolve().parents[2] / "bench/colab/results-202
 OBSERVED = set(json.loads(RESULTS.read_text())["metric_names"])
 
 SPEC = {
-    "id": "d-1", "team_slug": "t", "lane": "c", "replicas_min": 0, "replicas_max": 3,
-    "accelerator": "l4", "gpu_count": 1, "weights_uri": None, "engine_args": {},
+    "id": "d-1",
+    "team_slug": "t",
+    "lane": "c",
+    "replicas_min": 0,
+    "replicas_max": 3,
+    "accelerator": "l4",
+    "gpu_count": 1,
+    "weights_uri": None,
+    "engine_args": {},
 }
 
 

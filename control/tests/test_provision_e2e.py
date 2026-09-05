@@ -160,3 +160,73 @@ async def test_networkpolicy_and_quota_are_applied(spec):
     finally:
         await c.delete("Namespace", ns)
         await c.close()
+
+
+async def test_teardown_removes_the_workload(spec):
+    """The delete handler, which had never run before this stage.
+
+    Verifies the objects actually go, rather than the record merely saying so.
+    """
+    from control import gateway
+    from control.provisioner.main import teardown
+    from control.tests.conftest import _db_available
+
+    if not _db_available():
+        pytest.skip("teardown reads the deployment record")
+
+    import uuid as _uuid
+
+    from control import db
+
+    await k8s.load()
+    c = k8s.Cluster()
+    ns = f"keel-inf-{spec['team_slug']}"
+    dep_id = spec["id"]
+    try:
+        for obj in ns_render.render(spec["team_slug"], 2):
+            await c.apply(obj)
+        for obj in manifests.render(spec):
+            await c.apply(obj)
+        assert await c.get("Deployment", f"vllm-{dep_id}", ns) is not None
+
+        async with db.transaction() as conn:
+            await conn.execute(
+                """insert into teams (id, slug, oidc_group, gpu_quota)
+                   values (%s, %s, 'keel-dev', 2)""",
+                (str(_uuid.uuid4()), spec["team_slug"]),
+            )
+            await conn.execute(
+                """insert into catalog_models
+                     (id, mode, default_lane, accelerator, gpu_count, context_length,
+                      license, status, engine_args)
+                   values ('e2e-teardown', 'self_hosted', 'b', 'cpu', 0, 8192,
+                           'apache-2.0', 'validated', '{}')
+                   on conflict (id) do nothing"""
+            )
+            await conn.execute(
+                """insert into deployments
+                     (id, team_id, name, mode, lane, model_id, status, route_name,
+                      k8s_object_name, accelerator, gpu_count, replicas_min,
+                      replicas_max, engine_args, created_by)
+                   select %s, id, 'chat', 'self_hosted', 'b', 'e2e-teardown',
+                          'deleting', %s, %s, 'cpu', 0, 1, 1, '{}', 'test'
+                     from teams where slug = %s""",
+                (dep_id, f"{spec['team_slug']}/chat", f"vllm-{dep_id}", spec["team_slug"]),
+            )
+
+        await teardown(c, gateway.NullGateway(), dep_id)
+
+        assert await c.get("Deployment", f"vllm-{dep_id}", ns) is None
+        assert await c.get("Service", f"vllm-{dep_id}", ns) is None
+
+        async with db.pool().connection() as conn:
+            cur = await conn.execute("select status from deployments where id = %s", (dep_id,))
+            assert (await cur.fetchone())["status"] == "deleted"
+    finally:
+        async with db.transaction() as conn:
+            await conn.execute("delete from deployment_events where deployment_id = %s", (dep_id,))
+            await conn.execute("delete from deployments where id = %s", (dep_id,))
+            await conn.execute("delete from catalog_models where id = 'e2e-teardown'")
+            await conn.execute("delete from teams where slug = %s", (spec["team_slug"],))
+        await c.delete("Namespace", ns)
+        await c.close()
