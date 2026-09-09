@@ -61,7 +61,7 @@ test-unit:    ## domain only -- needs nothing at all
 	  control/tests/test_status.py control/tests/test_reconcile.py \
 	  control/tests/test_auth.py control/tests/test_rollup.py \
 	  control/tests/test_log_signatures.py control/tests/test_metrics_contract.py \
-	  control/tests/test_no_infra_imports.py
+	  control/tests/test_migrations.py control/tests/test_no_infra_imports.py
 
 lint:
 	uv run ruff check . && uv run ruff format --check .

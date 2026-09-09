@@ -27,6 +27,7 @@ jobs:
             control/tests/test_rollup.py \
             control/tests/test_log_signatures.py \
             control/tests/test_metrics_contract.py \
+            control/tests/test_migrations.py \
             control/tests/test_no_infra_imports.py
 
   # Tier 2: needs Postgres. Migrations are applied in order, so a migration

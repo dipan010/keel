@@ -1,0 +1,181 @@
+================================================================================
+STAGE 9 -- KEYS, IDENTITY, AND CI
+================================================================================
+
+WHAT THIS STAGE PRODUCES
+    A deployment can be consumed (keys), the API can run somewhere other than a
+    laptop (OIDC), and the tests stop depending on someone remembering to run
+    them (CI).
+
+--------------------------------------------------------------------------------
+PART A -- KEY ISSUANCE
+--------------------------------------------------------------------------------
+THE GAP
+    Without keys a deployment is either wide open or unusable. Nothing could
+    call one.
+
+METHOD -- PROBE, DO NOT ASSUME
+    Stage 7's lesson applied: LiteLLM's /key/generate was called against the
+    running gateway before any code was written. That is where the stored
+    fields come from --
+
+        key        the secret. Returned once. NEVER stored.
+        token      a genuine hash. A stable id, safe to keep.
+        key_name   a masked form, e.g. "sk-...v4Kw", safe to display.
+        alias      what /key/delete revokes by.
+
+THE INVARIANT
+    The secret exists in exactly one HTTP response and nowhere else -- not the
+    database, not a log, not recoverable by listing. Migration 0005 has no
+    column for it, and a test reads the stored row back and asserts the secret
+    is absent from it.
+
+THREE DELIBERATE CHOICES
+  - Scoped to ONE route via LiteLLM's `models`. This is what makes
+    per-deployment keys meaningful rather than decorative; verified against the
+    real gateway, where a key issued for one route gets 403 on another.
+  - Expire by default. An indefinitely valid credential in a CI config somebody
+    left a job ago is worse than a renewal.
+  - Budget defaults to the owning team's, so a key cannot outspend the team it
+    belongs to.
+
+ORDERING THAT MATTERS
+    Revocation calls the gateway BEFORE updating the record. Reversed, a failed
+    gateway call leaves a working key marked revoked -- the record claiming a
+    safety that does not exist.
+
+    Teardown revokes every key for a deployment. A key outliving its deployment
+    is a live credential pointing at nothing, and at something it was never
+    meant to reach if the route is later reused.
+
+    Rows survive revocation: "who had access, and when" is the question the
+    table exists to answer.
+
+FOUND BY THE TESTS
+ 1. The first fake gateway returned "hash-of-<secret>" as its token, embedding
+    the secret it stood in for. The persistence assertion caught it. That is
+    the second time an unfaithful fake was the bug rather than the code -- the
+    first was stage 8's metric names.
+
+ 2. Ten leaked jobs made the pipeline test claim a stranger's work. Chasing it
+    surfaced something real: THE RECONCILER SKIPS DEPLOYMENTS WITH AN OPEN JOB,
+    so a job nothing will ever claim disables reconciliation for that
+    deployment silently and indefinitely. No error, no alert, just a deployment
+    that quietly stops being watched. Jobs older than an hour are now reported
+    -- while still being skipped, since we do not start fighting the
+    Provisioner over them.
+
+--------------------------------------------------------------------------------
+PART B -- OIDC
+--------------------------------------------------------------------------------
+    auth.py had been a 501 with a TODO since stage 2, which meant the API ran
+    nowhere but a laptop. Tokens are now verified against the IdP's JWKS:
+    signature, issuer, audience, expiry, groups claim mapped to teams.
+
+    Failing closed is preserved. No issuer and no dev bypass still returns 501
+    and names which to set.
+
+CONCEPT -- THE ALGORITHM LIST IS AN ALLOWLIST
+    Trusting the token's own `alg` header is the classic JWT attack, in two
+    forms:
+
+      alg=none    the token asserts it needs no signature
+      alg=HS256   the token asserts symmetric signing, so the verifier uses the
+                  PUBLISHED RSA public key as an HMAC secret -- which the
+                  attacker also has, because it is published
+
+    The second is the dangerous one: the signature is GENUINELY VALID under
+    that reading, so verifying it does not help. Only refusing the algorithm
+    does. Both are tested with hand-forged tokens, the alg=none one built by
+    hand because jose correctly refuses to encode it.
+
+A REAL BUG THOSE TESTS FOUND
+    A forged alg=none token raises JWKError, which is a SIBLING of JWTError
+    rather than a subclass. The handler caught JWTError, so it escaped as a
+    500. An unhandled path in the auth layer is the last place to be surprised.
+    Now catches JOSEError, the common base.
+
+JWKS ROTATION
+    A TTL alone fails every request between a rotation and the cache expiring,
+    so refresh is also triggered by an unknown key id.
+
+    The cooldown is measured from the last FORCED refresh, not the last fetch.
+    Measuring from any fetch meant a rotation arriving just after the cache
+    warmed was ignored -- which is exactly when rotations bite.
+
+TWO SMALLER CHOICES
+  - Rejection reasons are not echoed back. Distinguishing "wrong audience" from
+    "bad signature" tells an attacker which half of the token to work on.
+  - No groups is a VALID USER who belongs to no team, not an error. Failing
+    there would make "you are in no groups" indistinguishable from "your token
+    is bad".
+
+--------------------------------------------------------------------------------
+PART C -- CI
+--------------------------------------------------------------------------------
+    Three jobs matching the tiers the suite was already organised into:
+
+      unit      needs nothing
+      database  a Postgres service; applies EVERY migration in order
+      cluster   k3d, the fake runtime, the fake GPU
+
+    `make ci` runs the same locally.
+
+WRITING THE CLUSTER TIER FOUND TWO BUGS IN fake-gpu.sh
+    Both were invisible on the machine the script was written on, because that
+    machine already had the node.
+
+ 1. It could not create its own node. It derived the name by stripping a
+    prefix and produced "k3d-gpu-0-0" -- k3d names a created node
+    "k3d-<name>-0", so the two must be derived from one value. It had only ever
+    run against a node made by hand.
+
+ 2. It patched capacity once and moved on. THE SCHEDULER READS ALLOCATABLE, and
+    the kubelet is what copies capacity to it. On a freshly joined node the
+    patch silently did not stick: capacity said 4, allocatable was empty, and
+    GPU pods would sit Pending with no obvious cause. It now re-patches until
+    allocatable agrees and fails loudly if it never does.
+
+ALSO FOUND
+    test_rollup probed one Prometheus URL and queried another, because
+    rollup.PROM defaults to an in-cluster DNS name read at import. That turned
+    "Prometheus is not running" into a DNS error and a failure instead of a
+    skip.
+
+--------------------------------------------------------------------------------
+A PREDICTION THAT WAS WRONG, CHECKED RATHER THAN ASSUMED
+--------------------------------------------------------------------------------
+    The migrations had only ever been applied incrementally on one machine, so
+    applying all five in order to an empty database was expected to break.
+
+    It did not. All five applied cleanly, and the resulting schema is BYTE
+    IDENTICAL to the incrementally-migrated one -- 117 lines of columns,
+    constraints and indexes, diffed, no differences. CI's database tier then
+    passed against it, 38 tests.
+
+    test_migrations.py now guards the cheap invariants that would make this
+    stop being true: numbers unique and contiguous, zero-padded so filename
+    order matches numeric order, and every migration wrapped in a single
+    transaction. Two people adding an 0006 is the ordinary way migration order
+    becomes ambiguous, and it is silent.
+
+--------------------------------------------------------------------------------
+VERIFY
+--------------------------------------------------------------------------------
+    make ci
+
+    From-scratch schema check (what CI's database job does):
+      docker run -d --name scratch -p 5433:5432 \
+        -e POSTGRES_USER=keel -e POSTGRES_PASSWORD=keel -e POSTGRES_DB=keel \
+        postgres:17-alpine
+      for f in control/migrations/*.sql; do
+        docker exec -i scratch psql -q -v ON_ERROR_STOP=1 -U keel -d keel < "$f"; done
+
+--------------------------------------------------------------------------------
+STILL OPEN
+--------------------------------------------------------------------------------
+    - no git remote: CI is committed but nothing runs it, and 159 tests live on
+      one disk with no backup. Blocked on `gh auth login`, which is interactive.
+    - docs/baseline.md: seven empty rows, one rented GPU hour, no code
+    - DCGM, for a real gpu_util_pct rather than a null
+    - a real OOM (stage 7's config check fired before memory ran out)

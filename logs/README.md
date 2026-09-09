@@ -15,6 +15,7 @@ principle that quietly stops being true.
 | 6     | GPU placement, without a GPU     | `0307145` |
 | 7     | Colab probe: real vLLM findings   | `2dc8e18` |
 | 8     | Teardown and telemetry            | `21e643b`, `a2d560d` |
+| 9     | Keys, identity, and CI            | `e3508d2`, `b399a25` |
 
 Read them in order. Each stage assumes the one before it.
 
