@@ -176,3 +176,17 @@ async def test_queries_are_accepted_by_a_real_prometheus(monkeypatch):
             # since this asserts the query is valid, not that data exists.
             await rollup.query(c, expr.format(w="5m"))
             assert name
+
+
+async def test_gpu_utilisation_is_null_without_dcgm():
+    """The exporter needs a real GPU. Absent, the column stays NULL rather than
+    borrowing KV-cache occupancy, which is a different measurement."""
+    async with _client(_result()) as c:
+        assert await rollup.query(c, rollup.QUERIES["gpu_util_pct"]) == {}
+
+
+def test_gpu_utilisation_comes_from_dcgm_not_vllm():
+    expr = rollup.QUERIES["gpu_util_pct"]
+    assert "DCGM_FI_DEV_GPU_UTIL" in expr
+    assert "vllm:" not in expr, "utilisation must not be inferred from a vLLM series"
+    assert "by (deployment_id)" in expr, "unattributed utilisation is not usable"

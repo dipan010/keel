@@ -42,6 +42,9 @@ monitoring:   ## deploy prometheus with the keel relabeling
 	kubectl apply -f deploy/monitoring/prometheus.yaml
 	kubectl rollout status deploy/prometheus -n keel-system --timeout=180s
 
+dcgm:         ## gpu utilisation -- needs a real GPU and the device plugin
+	kubectl apply -f deploy/monitoring/dcgm.yaml
+
 prom-fwd:     ## port-forward prometheus to localhost:9090
 	kubectl port-forward -n keel-system svc/prometheus 9090:9090
 

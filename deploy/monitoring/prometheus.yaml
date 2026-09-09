@@ -19,6 +19,23 @@ data:
     global:
       scrape_interval: 15s
     scrape_configs:
+      # DCGM attributes each GPU to the pod using it, and the relabeling below
+      # turns that pod into a deployment_id -- which is what makes
+      # deployment_metrics.gpu_util_pct attributable rather than cluster-wide.
+      - job_name: keel-dcgm
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: keep
+            regex: dcgm-exporter
+        metric_relabel_configs:
+          # DCGM labels samples with the consuming pod; map that to our id.
+          - source_labels: [exported_pod]
+            regex: 'vllm-(.+?)-[a-z0-9]+-[a-z0-9]+'
+            target_label: deployment_id
+            replacement: '$1'
+
       - job_name: keel-vllm
         kubernetes_sd_configs:
           - role: pod

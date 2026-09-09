@@ -1,0 +1,56 @@
+# DCGM exporter -- real GPU utilisation.
+#
+# deployment_metrics.gpu_util_pct is deliberately NULL until this is running.
+# KV-cache occupancy was available all along and is a different thing; writing
+# it under this name would be a wrong number wearing a familiar label.
+#
+# Requires an actual GPU and the NVIDIA device plugin. On a cluster where
+# nvidia.com/gpu is only advertised (deploy/kind/fake-gpu.sh), this pod will
+# schedule and then fail -- correctly, since there is nothing to measure.
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: dcgm-exporter
+  namespace: keel-system
+  labels: {app.kubernetes.io/managed-by: keel, app: dcgm-exporter}
+spec:
+  selector: {matchLabels: {app: dcgm-exporter}}
+  template:
+    metadata:
+      labels: {app: dcgm-exporter, app.kubernetes.io/managed-by: keel}
+    spec:
+      # Only on GPU nodes, and tolerating the taint that keeps everything else off.
+      nodeSelector: {}
+      tolerations:
+        - {key: keel.io/gpu, operator: Exists, effect: NoSchedule}
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - {key: keel.io/accelerator, operator: Exists}
+      containers:
+        - name: exporter
+          image: nvcr.io/nvidia/k8s/dcgm-exporter:3.3.9-3.6.1-ubuntu22.04
+          securityContext: {runAsNonRoot: false, runAsUser: 0}
+          env:
+            - {name: DCGM_EXPORTER_LISTEN, value: ":9400"}
+            # Attribute samples to the pod using the GPU, which is what makes
+            # per-deployment utilisation possible at all.
+            - {name: DCGM_EXPORTER_KUBERNETES, value: "true"}
+          ports: [{name: metrics, containerPort: 9400}]
+          volumeMounts:
+            - {name: pod-resources, mountPath: /var/lib/kubelet/pod-resources, readOnly: true}
+      volumes:
+        - name: pod-resources
+          hostPath: {path: /var/lib/kubelet/pod-resources}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dcgm-exporter
+  namespace: keel-system
+  labels: {app.kubernetes.io/managed-by: keel}
+spec:
+  selector: {app: dcgm-exporter}
+  ports: [{name: metrics, port: 9400, targetPort: 9400}]

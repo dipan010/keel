@@ -50,6 +50,10 @@ QUERIES: dict[str, str] = {
         "(rate(vllm:request_time_per_output_token_seconds_bucket[{w}]))) * 1000"
     ),
     "kv_cache_pct": ("avg by (deployment_id) (avg_over_time(vllm:kv_cache_usage_perc[{w}])) * 100"),
+    # DCGM, not vLLM. Absent until deploy/monitoring/dcgm.yaml runs on a real
+    # GPU -- and absent is the correct answer then: an empty result yields NULL
+    # rather than a substitute.
+    "gpu_util_pct": ("avg by (deployment_id) (avg_over_time(DCGM_FI_DEV_GPU_UTIL[{w}]))"),
 }
 
 
@@ -145,11 +149,11 @@ async def rollup_once(now: datetime | None = None) -> int:
                     "ttft_p50_ms": _int(series["ttft_p50_ms"].get(dep_id)),
                     "ttft_p95_ms": _int(series["ttft_p95_ms"].get(dep_id)),
                     "tpot_p50_ms": _int(series["tpot_p50_ms"].get(dep_id)),
-                    # Real GPU utilisation needs the DCGM exporter, which is not
-                    # deployed. KV-cache occupancy is a different thing and is
-                    # NOT written here in its place -- a wrong number under a
-                    # familiar name is worse than a null.
-                    "gpu_util_pct": None,
+                    # From DCGM. Stays NULL where the exporter is not running,
+                    # which is the honest answer -- KV-cache occupancy was
+                    # always available and is a different thing, and writing it
+                    # here would be a wrong number wearing a familiar name.
+                    "gpu_util_pct": series["gpu_util_pct"].get(dep_id),
                     "gpu_seconds": int(secs),
                     "cost_usd": pricing.cost_usd(row["accelerator"], row["gpu_count"] or 0, secs),
                 },
