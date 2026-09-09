@@ -19,17 +19,19 @@ CATALOG = pathlib.Path(__file__).resolve().parents[1] / "catalog"
 
 UPSERT = """
 insert into catalog_models
-  (id, mode, default_lane, weights_uri, accelerator, gpu_count, context_length,
-   quantization, engine_args, upstream_model, license, status, validated_at)
+  (id, mode, default_lane, weights_uri, model_ref, accelerator, gpu_count,
+   context_length, quantization, engine_args, upstream_model, license, status,
+   validated_at)
 values
-  (%(id)s, %(mode)s, %(default_lane)s, %(weights_uri)s, %(accelerator)s,
-   %(gpu_count)s, %(context_length)s, %(quantization)s, %(engine_args)s,
-   %(upstream_model)s, %(license)s, %(status)s,
+  (%(id)s, %(mode)s, %(default_lane)s, %(weights_uri)s, %(model_ref)s,
+   %(accelerator)s, %(gpu_count)s, %(context_length)s, %(quantization)s,
+   %(engine_args)s, %(upstream_model)s, %(license)s, %(status)s,
    case when %(status)s = 'validated' then now() else null end)
 on conflict (id) do update set
   mode = excluded.mode,
   default_lane = excluded.default_lane,
   weights_uri = excluded.weights_uri,
+  model_ref = excluded.model_ref,
   accelerator = excluded.accelerator,
   gpu_count = excluded.gpu_count,
   context_length = excluded.context_length,

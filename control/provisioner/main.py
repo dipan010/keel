@@ -40,8 +40,8 @@ class Failed(Exception):
 
 async def _load(conn: Any, deployment_id: str) -> dict[str, Any]:
     cur = await conn.execute(
-        """select d.*, t.slug as team_slug, t.gpu_quota, c.weights_uri, c.engine_args
-                    as catalog_engine_args
+        """select d.*, t.slug as team_slug, t.gpu_quota, c.weights_uri, c.model_ref,
+                    c.engine_args as catalog_engine_args
              from deployments d
              join teams t on t.id = d.team_id
              join catalog_models c on c.id = d.model_id
@@ -132,6 +132,11 @@ async def provision(cluster: k8s.Cluster, gw: gateway.Gateway, deployment_id: st
             "id": dep_id,
             "engine_args": dep["engine_args"] or dep["catalog_engine_args"] or {},
         }
+        # dep already carries model_ref via the catalog join; assert rather than
+        # let render() quietly emit "--model None".
+        assert spec.get("model_ref") or spec.get("weights_uri"), (
+            f"catalog entry {dep['model_id']} has neither model_ref nor weights_uri"
+        )
         for obj in manifests.render(spec):
             await cluster.apply(obj)
         log.info("provision.applied", id=dep_id, namespace=ns)

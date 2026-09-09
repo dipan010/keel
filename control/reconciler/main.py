@@ -40,7 +40,8 @@ INTERVAL = float(os.environ.get("KEEL_RECONCILE_INTERVAL", "60"))
 STALE_JOB_SECONDS = float(os.environ.get("KEEL_STALE_JOB_SECONDS", "3600"))
 
 DESIRED = """
-select d.*, t.slug as team_slug, c.weights_uri, c.engine_args as catalog_engine_args,
+select d.*, t.slug as team_slug, c.weights_uri, c.model_ref,
+       c.engine_args as catalog_engine_args,
        exists (select 1 from jobs j where j.deployment_id = d.id) as has_job,
        (select min(j.created_at) from jobs j where j.deployment_id = d.id)
          as oldest_job_at

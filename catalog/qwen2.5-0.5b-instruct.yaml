@@ -11,7 +11,7 @@
 id: qwen2.5-0.5b-instruct
 mode: self_hosted
 default_lane: b
-weights_uri: s3://keel-models/qwen2.5-0.5b-instruct
+model_ref: Qwen/Qwen2.5-0.5B-Instruct
 accelerator: l4
 gpu_count: 1
 context_length: 32768
@@ -22,6 +22,15 @@ engine_args:
   dtype: float16               # never leave this to auto -- see below
   max-model-len: 8192          # well under the 32k ceiling; nothing here needs it
   gpu-memory-utilization: 0.60 # leaves room to co-schedule while developing
+
+# weights_uri is deliberately unset, so vLLM fetches model_ref from
+# HuggingFace itself. That is one fewer moving part for a first run on real
+# hardware -- the node-local cache from ADR-0004 needs a fetcher image that
+# does not exist yet, and every deployment would ImagePullBackOff.
+#
+# Setting weights_uri later switches this entry to the mounted-cache path
+# without changing what it identifies. That separation is why model_ref
+# exists (migration 0006).
 
 # dtype is explicit on purpose. vLLM does NOT fail on an unsupported dtype:
 # on a T4 (compute 7.5, no bfloat16) it logs

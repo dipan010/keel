@@ -198,9 +198,9 @@ async def test_teardown_removes_the_workload(spec):
             await conn.execute(
                 """insert into catalog_models
                      (id, mode, default_lane, accelerator, gpu_count, context_length,
-                      license, status, engine_args)
+                      license, status, engine_args, model_ref)
                    values ('e2e-teardown', 'self_hosted', 'b', 'cpu', 0, 8192,
-                           'apache-2.0', 'validated', '{}')
+                           'apache-2.0', 'validated', '{}', 'fake/stand-in')
                    on conflict (id) do nothing"""
             )
             await conn.execute(

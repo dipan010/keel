@@ -58,9 +58,9 @@ async def catalog_entry():
         await conn.execute(
             """insert into catalog_models
                  (id, mode, default_lane, accelerator, gpu_count, context_length,
-                  license, status, engine_args, weights_uri)
+                  license, status, engine_args, weights_uri, model_ref)
                values (%s, 'self_hosted', 'b', 'cpu', 0, 8192, 'apache-2.0',
-                       'validated', '{}', null)
+                       'validated', '{}', null, 'fake/stand-in')
                on conflict (id) do nothing""",
             (CPU_MODEL,),
         )

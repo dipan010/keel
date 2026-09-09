@@ -36,9 +36,9 @@ async def catalog_entry():
         await conn.execute(
             """insert into catalog_models
                  (id, mode, default_lane, accelerator, gpu_count, context_length,
-                  license, status, engine_args, weights_uri)
+                  license, status, engine_args, weights_uri, model_ref)
                values (%s, 'self_hosted', 'b', 'cpu', 0, 8192, 'apache-2.0',
-                       'validated', '{}', null)
+                       'validated', '{}', null, 'fake/stand-in')
                on conflict (id) do nothing""",
             (CPU_MODEL,),
         )
@@ -232,6 +232,8 @@ async def test_a_stale_job_is_reported_not_silently_skipped(catalog_entry, team,
     cluster = k8s.Cluster()
     try:
         counts = await reconcile_once(cluster)
+        # >= 1 rather than == 1: this counts every stale job in the database,
+        # and only ours is guaranteed to be there.
         assert counts["stale_jobs"] >= 1
         # Still skipped -- we do not start fighting the Provisioner over it.
         assert await _status(dep_id) == Status.READY.value
@@ -240,15 +242,24 @@ async def test_a_stale_job_is_reported_not_silently_skipped(catalog_entry, team,
 
 
 async def test_a_fresh_job_is_skipped_quietly(catalog_entry, team):
-    """Normal in-flight work must not page anyone."""
-    dep_id, _ = await _seed(team)
-    async with db.transaction() as conn:
-        await conn.execute(
-            "insert into jobs (deployment_id, kind) values (%s, 'provision')", (dep_id,)
-        )
+    """Normal in-flight work must not page anyone.
+
+    Asserted as a DELTA, not an absolute. reconcile_once sweeps every
+    deployment in the database, so a shared environment with unrelated stale
+    work would fail an absolute assertion -- which it did, on nine real stale
+    jobs left by an earlier run.
+    """
     await k8s.load()
     cluster = k8s.Cluster()
     try:
-        assert (await reconcile_once(cluster))["stale_jobs"] == 0
+        before = (await reconcile_once(cluster))["stale_jobs"]
+
+        dep_id, _ = await _seed(team)
+        async with db.transaction() as conn:
+            await conn.execute(
+                "insert into jobs (deployment_id, kind) values (%s, 'provision')", (dep_id,)
+            )
+
+        assert (await reconcile_once(cluster))["stale_jobs"] == before
     finally:
         await cluster.close()

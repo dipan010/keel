@@ -98,7 +98,12 @@ def _weights_fetcher(dep: dict[str, Any]) -> dict[str, Any]:
 
 
 def _deployment(dep: dict[str, Any], name: str, ns: str, lb: dict[str, str]) -> dict[str, Any]:
-    args = ["--model", "/models/weights", "--port", str(VLLM_PORT)]
+    # Where the weights actually are. A mounted cache when the init container
+    # fetched them; otherwise the catalog's reference, which vLLM resolves
+    # itself. Hardcoding the mount path meant a deployment without a fetcher
+    # pointed at an empty directory.
+    model = "/models/weights" if dep.get("weights_uri") else dep.get("model_ref")
+    args = ["--model", str(model), "--port", str(VLLM_PORT)]
     for flag, value in (dep.get("engine_args") or {}).items():
         args += [f"--{flag}", str(value)]
 
