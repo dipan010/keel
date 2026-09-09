@@ -30,20 +30,32 @@ def _db_available() -> bool:
     return True
 
 
+#: Probed once, at import. Used both to skip database tests and to decide
+#: whether the pool fixture below should do anything at all.
+DB_AVAILABLE = _db_available()
+
 requires_db = pytest.mark.skipif(
-    not _db_available(), reason="no migrated Postgres at KEEL_DSN (run: make db && make migrate)"
+    not DB_AVAILABLE, reason="no migrated Postgres at KEEL_DSN (run: make db && make migrate)"
 )
 
 
 @pytest_asyncio.fixture(autouse=True)
 async def _pool():
-    """One pool for the whole test, opened once.
+    """One pool per test, opened once -- and ONLY when there is a database.
 
     Fixtures used to open and close it individually, so whichever tore down
-    first closed it out from under the others.
+    first closed it out from under the others. Making this autouse fixed that
+    and introduced a worse problem: it opened a pool for every test in the
+    suite, including the pure ones, so the tier that is supposed to need
+    nothing silently required Postgres. That passed on a machine that always
+    has one running and failed on every clean checkout -- 97 errors on CI's
+    first run.
     """
     from control import db
 
+    if not DB_AVAILABLE:
+        yield
+        return
     await db.open_pool()
     yield
     await db.close_pool()

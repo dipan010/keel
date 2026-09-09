@@ -77,10 +77,18 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with: {enable-cache: true}
       - run: uv sync --extra dev
-      - uses: AbsaOSS/k3d-action@v2
-        with:
-          cluster-name: keel
-          args: --agents 1 --wait
+      # Installed from k3d's own script rather than a third-party action.
+      # One fewer dependency to be pinned, deprecated or broken by a release we
+      # do not control -- and the same command developers run locally, so the
+      # cluster CI tests against is the cluster they debug against.
+      - name: install k3d and create a cluster
+        run: |
+          curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh \
+            | TAG=v5.9.0 bash
+          k3d version
+          k3d cluster create keel --agents 1 --wait
+          kubectl cluster-info
+          kubectl wait --for=condition=Ready nodes --all --timeout=180s
       - name: build and load the fake runtime
         run: |
           docker build -t keel/fake-runtime:dev bench/fake-runtime
