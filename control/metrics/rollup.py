@@ -54,6 +54,19 @@ QUERIES: dict[str, str] = {
     # GPU -- and absent is the correct answer then: an empty result yields NULL
     # rather than a substitute.
     "gpu_util_pct": ("avg by (deployment_id) (avg_over_time(DCGM_FI_DEV_GPU_UTIL[{w}]))"),
+    # The subset of prompt tokens that were NOT recomputed. tokens_in counts
+    # cached and computed alike, so without this the corpus overstates the work
+    # done per token on any workload with a shared prefix.
+    "tokens_in_cached": ("sum by (deployment_id) (increase(vllm:prompt_tokens_cached_total[{w}]))"),
+    # Hit rate over blocks, which is what vLLM actually measures -- not the same
+    # as the token ratio above, because a hit covers a block rather than a
+    # token. Both are recorded because they answer different questions: one is
+    # "how much work was skipped", the other "how often the cache was useful".
+    "prefix_cache_hit_pct": (
+        "100 * sum by (deployment_id) (increase(vllm:prefix_cache_hits_total[{w}])) "
+        "/ clamp_min(sum by (deployment_id) "
+        "(increase(vllm:prefix_cache_queries_total[{w}])), 1)"
+    ),
 }
 
 
@@ -98,17 +111,20 @@ def gpu_seconds(row: dict[str, Any], window: timedelta) -> float:
 UPSERT = """
 insert into deployment_metrics
   (deployment_id, window_start, requests, tokens_in, tokens_out,
-   ttft_p50_ms, ttft_p95_ms, tpot_p50_ms, gpu_util_pct, gpu_seconds, cost_usd)
+   ttft_p50_ms, ttft_p95_ms, tpot_p50_ms, gpu_util_pct, gpu_seconds, cost_usd,
+   tokens_in_cached, prefix_cache_hit_pct)
 values
   (%(deployment_id)s, %(window_start)s, %(requests)s, %(tokens_in)s, %(tokens_out)s,
    %(ttft_p50_ms)s, %(ttft_p95_ms)s, %(tpot_p50_ms)s, %(gpu_util_pct)s,
-   %(gpu_seconds)s, %(cost_usd)s)
+   %(gpu_seconds)s, %(cost_usd)s, %(tokens_in_cached)s, %(prefix_cache_hit_pct)s)
 on conflict (deployment_id, window_start) do update set
   requests = excluded.requests, tokens_in = excluded.tokens_in,
   tokens_out = excluded.tokens_out, ttft_p50_ms = excluded.ttft_p50_ms,
   ttft_p95_ms = excluded.ttft_p95_ms, tpot_p50_ms = excluded.tpot_p50_ms,
   gpu_util_pct = excluded.gpu_util_pct, gpu_seconds = excluded.gpu_seconds,
-  cost_usd = excluded.cost_usd
+  cost_usd = excluded.cost_usd,
+  tokens_in_cached = excluded.tokens_in_cached,
+  prefix_cache_hit_pct = excluded.prefix_cache_hit_pct
 """
 
 
@@ -154,6 +170,11 @@ async def rollup_once(now: datetime | None = None) -> int:
                     # always available and is a different thing, and writing it
                     # here would be a wrong number wearing a familiar name.
                     "gpu_util_pct": series["gpu_util_pct"].get(dep_id),
+                    # NULL rather than 0 when absent: "the cache served nothing"
+                    # and "we did not observe the cache" are different facts,
+                    # and only one of them should be averaged over later.
+                    "tokens_in_cached": _int(series["tokens_in_cached"].get(dep_id)),
+                    "prefix_cache_hit_pct": series["prefix_cache_hit_pct"].get(dep_id),
                     "gpu_seconds": int(secs),
                     "cost_usd": pricing.cost_usd(row["accelerator"], row["gpu_count"] or 0, secs),
                 },

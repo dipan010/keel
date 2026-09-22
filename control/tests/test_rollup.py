@@ -190,3 +190,38 @@ def test_gpu_utilisation_comes_from_dcgm_not_vllm():
     assert "DCGM_FI_DEV_GPU_UTIL" in expr
     assert "vllm:" not in expr, "utilisation must not be inferred from a vLLM series"
     assert "by (deployment_id)" in expr, "unattributed utilisation is not usable"
+
+
+# ---------- prefix cache ----------
+
+
+def test_cached_prompt_tokens_are_a_subset_not_a_replacement():
+    """tokens_in keeps meaning ALL prompt tokens, so nothing that already reads
+    it changes behaviour. Computed work is tokens_in - tokens_in_cached."""
+    expr = rollup.QUERIES["tokens_in_cached"]
+    assert "vllm:prompt_tokens_cached_total" in expr
+    assert rollup.QUERIES["tokens_in"] != expr
+    assert "vllm:prompt_tokens_total" in rollup.QUERIES["tokens_in"]
+
+
+def test_hit_rate_cannot_divide_by_zero():
+    """A window with no queries at all must not produce a NaN or an error --
+    clamp_min keeps the denominator at one."""
+    assert "clamp_min" in rollup.QUERIES["prefix_cache_hit_pct"]
+
+
+async def test_absent_cache_metrics_are_null_not_zero():
+    """ "The cache served nothing" and "we did not observe the cache" are
+    different facts, and only one of them should be averaged over later."""
+    async with _client(_result()) as c:
+        assert await rollup.query(c, rollup.QUERIES["tokens_in_cached"]) == {}
+        assert await rollup.query(c, rollup.QUERIES["prefix_cache_hit_pct"]) == {}
+
+
+def test_both_cache_measures_are_recorded_because_they_differ():
+    """Token ratio and block hit rate are not the same number: a hit covers a
+    block, not a token. One answers "how much work was skipped", the other
+    "how often the cache was useful"."""
+    assert "tokens_in_cached" in rollup.QUERIES
+    assert "prefix_cache_hit_pct" in rollup.QUERIES
+    assert rollup.QUERIES["tokens_in_cached"] != rollup.QUERIES["prefix_cache_hit_pct"]

@@ -32,6 +32,11 @@ TPOT_BUCKETS = (0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0)
 _requests = 0
 _prompt_tokens = 0
 _generation_tokens = 0
+# Prefix reuse: most agent workloads share a system prompt, so a realistic
+# fake has to serve some prompt tokens from cache rather than none.
+_prompt_tokens_cached = 0
+_prefix_queries = 0
+_prefix_hits = 0
 _ttft: list[float] = []
 _tpot: list[float] = []
 
@@ -54,10 +59,16 @@ def models():
 @app.post("/v1/chat/completions")
 def chat(body: dict):
     global _requests, _prompt_tokens, _generation_tokens
+    global _prompt_tokens_cached, _prefix_queries, _prefix_hits
     _requests += 1
     out = random.randint(20, 80)
     _prompt_tokens += 12
     _generation_tokens += out
+    # After the first request the shared prefix is warm.
+    cached = 0 if _requests == 1 else 8
+    _prompt_tokens_cached += cached
+    _prefix_queries += 1
+    _prefix_hits += 0 if _requests == 1 else 1
     _ttft.append(random.uniform(0.04, 0.6))
     _tpot.append(random.uniform(0.008, 0.05))
     return {
@@ -95,6 +106,9 @@ def metrics():
         [
             f"vllm:request_success_total {_requests}",
             f"vllm:prompt_tokens_total {_prompt_tokens}",
+            f"vllm:prompt_tokens_cached_total {_prompt_tokens_cached}",
+            f"vllm:prefix_cache_queries_total {_prefix_queries}",
+            f"vllm:prefix_cache_hits_total {_prefix_hits}",
             f"vllm:generation_tokens_total {_generation_tokens}",
             f"vllm:num_requests_running {random.randint(0, 2)}",
             f"vllm:num_requests_waiting {random.randint(0, 3)}",

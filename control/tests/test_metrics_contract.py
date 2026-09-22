@@ -78,3 +78,26 @@ def test_kv_cache_metric_was_renamed():
     # gpu_cache_usage_perc no longer exists; it is kv_cache_usage_perc.
     assert "vllm:gpu_cache_usage_perc" not in OBSERVED
     assert "vllm:kv_cache_usage_perc" in OBSERVED
+
+
+def test_the_fake_runtime_exposes_every_series_the_rollup_queries():
+    """A fake whose interface is narrower than the real thing silently makes
+    the rollup untestable -- which has already happened twice in this project,
+    with metric names and with a key hash.
+    """
+    import re
+
+    from control.metrics import rollup
+
+    fake = (pathlib.Path(__file__).resolve().parents[2] / "bench/fake-runtime/app.py").read_text()
+    wanted = {
+        m for expr in rollup.QUERIES.values() for m in re.findall(r"vllm:[a-zA-Z0-9_]+", expr)
+    }
+    missing = []
+    for metric in sorted(wanted):
+        # Histograms are emitted as _bucket/_count/_sum by the helper, so match
+        # on the base name the fake writes.
+        base = re.sub(r"_(bucket|count|sum)$", "", metric)
+        if base not in fake:
+            missing.append(metric)
+    assert not missing, f"the fake runtime never emits: {missing}"
