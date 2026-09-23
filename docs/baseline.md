@@ -107,6 +107,14 @@ Only real hardware can answer these, and all three are still open:
   Colab's disk and network. If a real L4 differs sharply, the estimator's
   eventual model has to account for the environment, not just the accelerator.
 
+## Before you start
+
+Read `docs/gpu-hour-expectations.md`. It records what is expected to break,
+written before the run so it can be scored rather than rationalised —
+including one failure (`runtimeClassName`) that is likely enough to be worth
+fixing beforehand, and one outcome (Keel losing the comparison) that should
+be reported rather than explained away.
+
 ## Honesty note
 
 Nothing in Keel has run against a real vLLM inside a cluster. Every green test
