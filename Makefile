@@ -65,6 +65,7 @@ test-unit:    ## domain only -- needs nothing at all
 	  control/tests/test_auth.py control/tests/test_rollup.py \
 	  control/tests/test_log_signatures.py control/tests/test_metrics_contract.py \
 	  control/tests/test_migrations.py control/tests/test_model_ref.py \
+	  control/tests/test_version_pin.py \
 	  control/tests/test_no_infra_imports.py
 
 lint:

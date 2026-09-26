@@ -22,7 +22,13 @@ TAINT_GPU = "keel.io/gpu"
 
 #: Pinned per environment. A cluster with no GPUs (CI, a laptop) runs the
 #: fake runtime from bench/ through exactly this code path.
-VLLM_IMAGE = os.environ.get("KEEL_RUNTIME_IMAGE", "vllm/vllm-openai:v0.11.0")
+#: Must match the version every metric name and log signature was verified
+#: against -- bench/colab/results-*.json. It was v0.11.0 until 2026-09-27,
+#: a stage-1 guess made before a real vLLM had been seen, while everything
+#: downstream was verified against 0.28.0. test_version_pin keeps them equal.
+VLLM_VERSION = "0.28.0"
+DEFAULT_VLLM_IMAGE = f"vllm/vllm-openai:v{VLLM_VERSION}"
+VLLM_IMAGE = os.environ.get("KEEL_RUNTIME_IMAGE", DEFAULT_VLLM_IMAGE)
 FETCHER_IMAGE = os.environ.get("KEEL_WEIGHTS_FETCHER_IMAGE", "keel/weights-fetcher:dev")
 VLLM_PORT = 8000
 #: Weight loading is slow and that is not a fault: fail readiness during it

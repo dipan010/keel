@@ -20,6 +20,8 @@ DEFAULT_RATES: dict[str, float] = {
     "t4": 0.35,
     "l4": 0.70,
     "a10": 1.00,
+    # AWS g5 reports its card as "A10G" -- a distinct label, same rough rate.
+    "a10g": 1.00,
     "a100-40g": 2.00,
     "a100-80g": 3.00,
     "h100": 5.00,

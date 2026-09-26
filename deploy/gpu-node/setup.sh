@@ -11,7 +11,10 @@
 #   # or: scp it over and run it
 set -euo pipefail
 
-ACCELERATOR=${ACCELERATOR:-l4}     # must match the catalog entry's accelerator
+# ACCELERATOR is detected from the card itself unless you override it. It used
+# to default to l4 -- so renting an A10 and forgetting the override labelled
+# the node l4, and a catalog entry asking for an A10 could never schedule.
+ACCELERATOR=${ACCELERATOR:-}
 K3S_VERSION=${K3S_VERSION:-}       # empty = k3s stable
 
 say() { printf '\n=== %s ===\n' "$*"; }
@@ -19,6 +22,32 @@ say() { printf '\n=== %s ===\n' "$*"; }
 say "what hardware is this"
 nvidia-smi --query-gpu=name,memory.total,compute_cap,driver_version --format=csv \
   || { echo "no nvidia-smi: this box has no usable GPU driver" >&2; exit 1; }
+
+detect_accelerator() {
+  local name
+  name=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -1)
+  case "$name" in
+    *H100*)            echo h100 ;;
+    *A100*80GB*)       echo a100-80g ;;
+    *A100*)            echo a100-40g ;;
+    *A10G*)            echo a10g ;;   # AWS g5 -- reports A10G, not A10
+    *A10*)             echo a10 ;;
+    *L4*)              echo l4 ;;
+    *T4*)              echo t4 ;;
+    *)                 echo "unknown:$name" ;;
+  esac
+}
+if [ -z "$ACCELERATOR" ]; then
+  ACCELERATOR=$(detect_accelerator)
+  echo "detected accelerator: $ACCELERATOR"
+fi
+case "$ACCELERATOR" in
+  unknown:*)
+    echo "Could not map this card to a Keel accelerator label: ${ACCELERATOR#unknown:}" >&2
+    echo "Re-run with ACCELERATOR=<label>, and add that label to control/pricing.py" >&2
+    echo "or its cost will silently read zero." >&2
+    exit 1 ;;
+esac
 
 # Compute capability decides dtype. Below 8.0 there is no bfloat16, and vLLM
 # will silently downcast rather than fail -- see ADR-0007.
@@ -96,7 +125,12 @@ for c in $RTC; do case "$c" in nvidia*) NVIDIA_RTC="$c"; break;; esac; done
 say "done"
 cat <<NOTE
 Node:          $NODE
-Accelerator:   $ACCELERATOR   (catalog entries must match this label)
+Accelerator:   $ACCELERATOR
+
+  !! Catalog entries schedule here ONLY if their `accelerator:` is exactly
+  !! "$ACCELERATOR". Both current entries say l4. On any other card, edit
+  !! them before provisioning, or every deployment sits unschedulable and
+  !! fails after the 120s grace period.
 Compute cap:   $CAP
 RuntimeClass:  ${NVIDIA_RTC:-<none found>}
 
