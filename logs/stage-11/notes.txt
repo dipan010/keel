@@ -74,13 +74,41 @@ WHAT BROKE ON FIRST CONTACT
 --------------------------------------------------------------------------------
 RESULTS
 --------------------------------------------------------------------------------
-    KServe backend      200 passed, 3 skipped (manifest-internals tests, each
-                        with a KServe equivalent)
+    spike suite         14 passed (local), 35 with RBAC on a from-zero cluster
+    KServe backend      full suite green; the tests that exercise KServe are
+                        test_full_pipeline, reconciler e2e, test_kserve_spike
     manifests backend   203 passed
     footprint           peak 4.62 GiB of 7.65; zero evictions, zero OOM kills
 
     The seam held, but wider than claimed: the status classifier needed no
     change, while three Provisioner call sites depend on the backend.
+
+--------------------------------------------------------------------------------
+THE REVIEW, AND WHAT IT FOUND
+--------------------------------------------------------------------------------
+    The first grading was reviewed before being reported, and its PASSes turned
+    out to rest on narrower evidence than claimed. Six more checks:
+
+ 1. KServe injects cpu: 1 / memory: 2Gi into ANY unset resource field. A real
+    vLLM would be OOMKilled loading weights. The fifth laxer-fake finding: the
+    fake uses ~100 MB. Every field must now be explicit.
+ 2. GPU placement through KServe verified -- it had never met a scheduler.
+ 3. Standard mode's HPA scales on CPU at 80%; lane B now pinned min == max.
+ 4. Metrics attribution on a KServe pod observed, not inferred.
+ 5. A spike test that could not fail was pinned to UPDATING/drift.
+ 6. From zero, install.sh raced one of three webhook servers and mislabelled
+    thirteen different failures as the one "known" error. Fixed; proven on a
+    scratch cluster (35/35); CI now rebuilds it from zero on Linux.
+
+    CONCEPT: A FILTER WRITTEN FOR ONE ERROR WILL SWALLOW OTHERS
+    install.sh matched "any error" and labelled it with a message written for a
+    specific defect. It now tolerates exactly one error, by its exact text, and
+    fails on anything else. A known-issue allowlist must be as narrow as the
+    issue.
+
+    Also found: a new client pod is refused by NetworkPolicy for ~1s until k3s
+    syncs its IP (control run without the policy: 8/8). Explains stage 8's
+    partial success rates. The gateway's 20s readiness delay covers it.
 
 --------------------------------------------------------------------------------
 NOT VALIDATED
@@ -92,10 +120,11 @@ NOT VALIDATED
 --------------------------------------------------------------------------------
 IF ACCEPTED
 --------------------------------------------------------------------------------
-    Delete the manifest renderer rather than keep both. And migrate: under
-    KServe the reconciler lists InferenceServices, so any raw Deployment left
-    by the manifest backend becomes a silent orphan. Free today, since nothing
-    is deployed for real; it only gets more expensive.
+    1. explicit host CPU/memory in the catalog (schema change)
+    2. an autoscaling decision on a real signal
+    3. migrate manifest-rendered deployments -- invisible to a reconciler that
+       lists InferenceServices, i.e. silent orphans
+    4. delete the manifest renderer rather than keep both
 
 --------------------------------------------------------------------------------
 VERIFY

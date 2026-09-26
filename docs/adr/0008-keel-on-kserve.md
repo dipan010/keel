@@ -103,7 +103,7 @@ Setup is reproducible: `deploy/kserve/install.sh`.
 | 2 | Provisioner may create InferenceServices only in team namespaces | **PASS**, after a fix | Before the RBAC change the real ServiceAccount got **no** in a team namespace. As admin, everything had worked. Now yes-in-team, no-elsewhere, pinned in `test_rbac.py` |
 | 3 | Keel labels reach the pods | **PASS** | All three labels propagate to the generated Deployment and pods; `pods_for()` selects by them |
 | 4 | Upstream derived, not assumed | **PASS**, after a fix | KServe creates `{name}-predictor` on port 80 → 8000. The hardcoded `{name}...:8000` would have pointed the gateway at nothing. Now read from `status.address.url` |
-| 5 | Existing e2e suite passes | **PASS** | KServe backend: 200 passed, 3 skipped (manifest-internals tests, each with a KServe equivalent). Manifests backend: 203 passed. Includes the full pipeline to a real completion through LiteLLM, keys and revocation |
+| 5 | Existing e2e suite passes | **PASS** | *Corrected wording:* most of the suite is backend-independent or calls the manifest renderer directly, so "200 passed" overstated it. The tests that actually exercise the KServe path are `test_full_pipeline` (request → InferenceService → pod → LiteLLM → completion, plus keys and revocation), the reconciler e2e tests under `KEEL_RENDER_BACKEND=kserve`, and the 14 tests in `test_kserve_spike.py`. All pass. Manifests backend unaffected: 203 passed |
 | 6 | Fits in the 8 GB VM | **PASS** | Peak 4.62 GiB of 7.65 across nodes during the full suite. Zero evictions, zero OOM kills. KServe + cert-manager cost ~1.3 GiB |
 
 ### Kill criteria
@@ -174,8 +174,66 @@ a migration that re-provisions every existing deployment, or a transition
 period in which the reconciler lists both kinds. Nothing is deployed for real
 yet, so today the cost is zero; it only grows.
 
+## Review checks — run after the first grading
+
+A review of the first grading found the PASSes rested on narrower evidence than
+claimed. Six further checks, all on live clusters:
+
+1. **KServe injects `cpu: 1` / `memory: 2Gi` into any resource field left
+   unset** — as both request and limit. A real vLLM streams weights through host
+   memory; **every real deployment would have been OOMKilled during weight
+   load.** The fake uses ~100 MB, so no test could notice; only inspecting the
+   pod found it. KServe *does* honour explicit values — but fills each omitted
+   field individually (asking for a CPU request alone still got a `cpu: 1`
+   limit injected, which would throttle vLLM's API server). **So every field
+   must be explicit.** Pinned in `test_explicit_resources_survive...`.
+2. **GPU placement through KServe** had never met a scheduler — every spike test
+   used `gpu_count: 0`. Verified: the pod lands on the GPU node with selector,
+   toleration and `nvidia.com/gpu: 1` intact, counted against the team quota.
+3. **Standard mode creates an HPA scaling on CPU at 80%.** The spike only
+   looked inert because every test used `replicas_max: 1`. For a GPU-bound
+   engine CPU is the wrong signal. The manifest backend never autoscaled lane B;
+   the KServe renderer silently added it. Now pinned min == max for lane B.
+   KServe's `scaleMetric` offers cpu, memory, concurrency and rps — no queue
+   depth — so real autoscaling is a separate decision (likely KEDA on
+   `vllm:num_requests_waiting`).
+4. **Metrics attribution on a KServe pod**, previously inferred from labels, is
+   now observed: scrape target up, `vllm:request_success_total` carrying
+   `deployment_id`.
+5. **One spike test could not fail** the way it claimed: it accepted UPDATING
+   *or* DEGRADED, so broken drift detection would pass. It now waits for the
+   edit to settle and pins UPDATING with reason `drift`.
+6. **From zero, `install.sh` was broken — and dishonest about it.** It waited
+   for one of KServe's three webhook servers. On a clean cluster all twelve
+   `LLMInferenceServiceConfig`s failed because the LLM webhook was not up yet,
+   and the script labelled those thirteen failures with the "known defect"
+   message written for a *different* single error. Only a clean-cluster run
+   found it. Fixed: waits for all three, retries, and tolerates only the known
+   error by its exact text. Proven on a scratch cluster from nothing: 35/35
+   spike and RBAC tests. A CI job now repeats this on Linux for every push to
+   `spike/**`.
+
+**Also found, not KServe-specific:** a newly started client pod is refused by
+the target namespace's NetworkPolicy for about a second, until k3s's policy
+controller syncs its IP (proved with a control run without the policy: 8/8
+first-attempt successes). It explains stage 8's unexplained partial success
+rates. The gateway is protected in practice by LiteLLM's 20-second readiness
+delay — worth knowing before anyone shortens it.
+
 ## Recommendation
 
-**Accept.** All six criteria pass without patching KServe; the seam held, if
-slightly wider than claimed. On acceptance the manifest renderer should be
-deleted rather than kept beside KServe — parallel paths rot.
+**Accept — with four requirements that did not exist before the review:**
+
+1. **Explicit resources in the catalog.** Host CPU and memory, request and
+   limit, for every model — a schema change. Without it the first real model
+   on KServe is OOMKilled.
+2. **An autoscaling decision.** Lane B stays fixed-replica until one is made
+   on a real signal.
+3. **Migrate existing manifest-rendered deployments** — they are invisible to a
+   reconciler that lists InferenceServices. Free today, since nothing real is
+   deployed.
+4. **Delete the manifest renderer** rather than keep both paths.
+
+All six criteria pass without patching KServe, and the seam held — slightly
+wider than claimed. The review checks mostly moved risk from "unknown" to
+"named requirement", which is what a spike is for.

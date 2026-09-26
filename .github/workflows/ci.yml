@@ -2,7 +2,7 @@ name: ci
 
 on:
   push:
-    branches: [main]
+    branches: [main, 'spike/**']
   pull_request:
 
 jobs:
@@ -101,3 +101,51 @@ jobs:
       - run: uv run pytest -q control/tests/test_provision_e2e.py
                             control/tests/test_rbac.py
                             control/tests/test_gpu_scheduling_e2e.py
+
+  # ADR-0008. KServe installed FROM ZERO on every run, on Linux -- because the
+  # first clean-cluster run found a webhook race that a hand-configured cluster
+  # never could, and four times in this project something worked on the
+  # development machine and broke on a clean one.
+  kserve:
+    if: startsWith(github.ref, 'refs/heads/spike/')
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: keel
+          POSTGRES_PASSWORD: keel
+          POSTGRES_DB: keel
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U keel"
+          --health-interval 5s --health-timeout 5s --health-retries 10
+    env:
+      KEEL_DSN: postgresql://keel:keel@localhost:5432/keel
+      KEEL_DEV_AUTH: "1"
+      KEEL_RUNTIME_IMAGE: keel/fake-runtime:dev
+      KEEL_READY_DELAY: "2"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with: {enable-cache: true}
+      - run: uv sync --extra dev
+      - name: schema and catalog
+        run: |
+          for f in control/migrations/*.sql; do
+            psql "$KEEL_DSN" -v ON_ERROR_STOP=1 -q -f "$f"
+          done
+          uv run python -m control.catalog_sync
+      - name: cluster
+        run: |
+          curl -sfL https://raw.githubusercontent.com/k3d-io/k3d/main/install.sh | TAG=v5.9.0 bash
+          k3d cluster create keel --agents 1 --wait
+          kubectl wait --for=condition=Ready nodes --all --timeout=180s
+          docker build -t keel/fake-runtime:dev bench/fake-runtime
+          k3d image import keel/fake-runtime:dev -c keel
+          kubectl apply -f deploy/kind/namespaces.yaml -f deploy/rbac.yaml
+          CLUSTER=keel ./deploy/kind/fake-gpu.sh
+      - name: KServe from zero
+        run: ./deploy/kserve/install.sh
+      - name: spike suite
+        run: uv run pytest -q control/tests/test_kserve_spike.py control/tests/test_rbac.py

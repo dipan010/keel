@@ -30,13 +30,40 @@ kubectl apply --server-side --force-conflicts -f "$REL/kserve-crds.yaml" >/dev/n
 kubectl apply --server-side --force-conflicts -f "$REL/kserve.yaml" >/dev/null
 kubectl -n kserve rollout status deploy/kserve-controller-manager --timeout=400s
 
+echo "== waiting for every KServe webhook server"
+# kserve.yaml starts three controllers, each serving its own admission webhook.
+# Applying cluster resources before ALL of them are ready makes the apiserver
+# fail to call the missing webhook. An earlier version waited only for the
+# main controller: from zero, all twelve LLMInferenceServiceConfigs failed
+# with "failed calling webhook ... llmisvc", and the script reported that as
+# the one known error -- a label written for a different failure, swallowing
+# this one. Only a clean-cluster run found it.
+for d in kserve-controller-manager llmisvc-controller-manager kserve-localmodel-controller-manager; do
+  kubectl -n kserve rollout status "deploy/$d" --timeout=400s
+done
+
 echo "== cluster resources"
-# One LLMInferenceServiceConfig in v0.21.0 is rejected by KServe's own webhook
-# (a template references a field the type does not have). It affects only the
-# LLM CRD, which this spike does not use, so it is reported and not fatal.
-if ! out=$(kubectl apply --server-side --force-conflicts -f "$REL/kserve-cluster-resources.yaml" 2>&1); then
-  echo "$out" | grep -i error | cut -c1-200 | sed 's/^/   (known, LLM-only) /'
+# Exactly one failure is expected in v0.21.0, and it is matched by its specific
+# text: an LLMInferenceServiceConfig whose template references a field
+# (TrustRemoteCode) its own webhook's type lacks. LLM-only; the spike does not
+# use it. ANY other error is unexpected and fails the install -- after retries,
+# since webhook endpoints can lag their Deployment's rollout by a few seconds.
+KNOWN="can't evaluate field TrustRemoteCode"
+for attempt in 1 2 3 4 5 6; do
+  out=$(kubectl apply --server-side --force-conflicts \
+        -f "$REL/kserve-cluster-resources.yaml" 2>&1) && break
+  unexpected=$(echo "$out" | grep -i error | grep -vF "$KNOWN" || true)
+  [ -z "$unexpected" ] && break
+  echo "   attempt $attempt: $(echo "$unexpected" | wc -l | tr -d ' ') unexpected error(s), retrying"
+  sleep 10
+done
+unexpected=$(echo "$out" | grep -i error | grep -vF "$KNOWN" || true)
+if [ -n "$unexpected" ]; then
+  echo "UNEXPECTED errors applying cluster resources:" >&2
+  echo "$unexpected" | cut -c1-240 >&2
+  exit 1
 fi
+echo "$out" | grep -F "$KNOWN" | head -1 | cut -c1-160 | sed 's/^/   (known v0.21.0 defect, LLM-only) /'
 
 echo "== configuring for Keel"
 cfg=$(kubectl -n kserve get configmap inferenceservice-config -o json)

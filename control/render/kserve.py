@@ -38,6 +38,23 @@ MODE_ANNOTATION = "serving.kserve.io/deploymentMode"
 MODE = "Standard"
 
 
+def _container_resources(dep: dict[str, Any]) -> dict[str, Any]:
+    """Always explicit, because silence is not neutral here.
+
+    With no resources set, KServe injects cpu: 1 / memory: 2Gi as BOTH request
+    and limit. A real vLLM streams weights through host memory and needs far
+    more than 2Gi -- every real deployment would be OOMKilled during weight
+    load. The fake runtime uses about 100 MB, so nothing noticed. Found by
+    inspecting the pod KServe actually created, not by any test.
+    """
+    extra = dep.get("resources") or {}
+    requests = {**(extra.get("requests") or {})}
+    limits = {**(extra.get("limits") or {})}
+    gpu = (_resources(dep).get("resources") or {}).get("limits") or {}
+    limits.update(gpu)
+    return {"requests": requests, "limits": limits}
+
+
 def render(dep: dict[str, Any]) -> list[dict[str, Any]]:
     name = object_name(dep["id"])
     ns = namespace(dep["team_slug"])
@@ -76,16 +93,24 @@ def render(dep: dict[str, Any]) -> list[dict[str, Any]]:
             "periodSeconds": 10,
             "failureThreshold": 90,
         },
-        **_resources(dep),
+        "resources": _container_resources(dep),
     }
 
     replicas_min = dep.get("replicas_min") or 0
     if Lane(dep["lane"]) is not Lane.C:
         replicas_min = max(replicas_min, 1)
+    # Lane B is FIXED replicas, as the manifest backend always rendered it.
+    # Passing replicas_max through lets KServe's Standard mode create an HPA
+    # scaling on CPU at 80% -- the wrong signal for a GPU-bound engine, adding
+    # GPU replicas because the tokenizer got busy. min == max makes that HPA
+    # inert until autoscaling is a deliberate decision on a real signal.
+    replicas_max = replicas_min if Lane(dep["lane"]) is Lane.B else max(
+        dep.get("replicas_max") or 1, replicas_min, 1
+    )
 
     predictor: dict[str, Any] = {
         "minReplicas": replicas_min,
-        "maxReplicas": max(dep.get("replicas_max") or 1, replicas_min, 1),
+        "maxReplicas": replicas_max,
         "containers": [container],
         **_placement(dep),
         **_runtime_class(dep),

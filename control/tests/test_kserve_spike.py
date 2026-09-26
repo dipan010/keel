@@ -72,6 +72,12 @@ def _spec(dep_id: str, slug: str, **over) -> dict:
         "model_ref": "fake/stand-in",
         "engine_args": {},
         "k8s_object_name": f"vllm-{dep_id}",
+        # Every field explicit. Leave one out and KServe fills it -- memory 2Gi,
+        # cpu 1 -- which a real vLLM would be OOMKilled under during weight load.
+        "resources": {
+            "requests": {"cpu": "100m", "memory": "256Mi"},
+            "limits": {"cpu": "1", "memory": "512Mi"},
+        },
         **over,
     }
 
@@ -294,16 +300,36 @@ async def test_a_manual_edit_to_the_inferenceservice_is_keels_to_report(isvc):
             body={"spec": {"predictor": {"minReplicas": 3, "maxReplicas": 3}}},
             headers={"Content-Type": "application/merge-patch+json"},
         )
+        # Wait for KServe to finish applying the edit. Asserting mid-rollout let
+        # an earlier version accept DEGRADED too -- which would have passed even
+        # with drift detection broken. Availability is judged before drift, so
+        # only a READY resource isolates the drift check.
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 180
+        while loop.time() < deadline:
+            live = await c.get("InferenceService", spec["k8s_object_name"], ns)
+            conds = (live.get("status") or {}).get("conditions") or []
+            ready = any(x["type"] == "Ready" and x["status"] == "True" for x in conds)
+            if ready and len(await c.pods_for(ns, dep_id)) == 3:
+                break
+            await asyncio.sleep(3)
+        else:
+            pytest.fail("the edited InferenceService never settled at 3 replicas")
+
         await reconcile_once(c)
         async with db.pool().connection() as conn:
             cur = await conn.execute(
-                "select status, (select count(*) from jobs where deployment_id=%s) as jobs "
-                "from deployments where id=%s",
-                (dep_id, dep_id),
+                """select d.status,
+                          (select count(*) from jobs where deployment_id=d.id) as jobs,
+                          (select reason_code from deployment_events
+                            where deployment_id=d.id order by at desc limit 1) as reason
+                     from deployments d where d.id=%s""",
+                (dep_id,),
             )
             row = await cur.fetchone()
-        assert row["status"] in (Status.UPDATING.value, Status.DEGRADED.value), row
-        assert row["jobs"] >= 1 or row["status"] == Status.DEGRADED.value
+        assert row["status"] == Status.UPDATING.value, row
+        assert row["reason"] == "drift", row
+        assert row["jobs"] == 1, "drift must ask the Provisioner to re-apply"
         live = await c.get("InferenceService", spec["k8s_object_name"], ns)
         assert live["spec"]["predictor"]["minReplicas"] == 3, "the reconciler wrote to the cluster"
     finally:
@@ -332,6 +358,93 @@ async def test_an_orphaned_inferenceservice_is_reported_and_survives(monkeypatch
         counts = await reconcile_once(c)
         assert counts["orphans"] >= 1
         assert await c.get("InferenceService", f"vllm-{ghost}", ns) is not None, "I5 violated"
+    finally:
+        await c.delete("Namespace", ns)
+        await c.close()
+
+
+@requires_kserve
+async def test_explicit_resources_survive_and_nothing_is_left_to_kserve(isvc):
+    """KServe injects cpu: 1 / memory: 2Gi into any field left unset -- as both
+    request and limit. A real vLLM would be OOMKilled during weight load under
+    that; the fake uses ~100 MB, so only inspecting the pod found it. Asserted
+    on the POD, because the InferenceService spec only shows what we asked."""
+    c, spec, ns = isvc
+    pod = (await c.pods_for(ns, spec["id"]))[0]
+    got = pod["spec"]["containers"][0]["resources"]
+    assert got["requests"] == spec["resources"]["requests"]
+    assert got["limits"] == spec["resources"]["limits"], "KServe replaced an explicit limit"
+
+
+@requires_kserve
+async def test_lane_b_does_not_autoscale_on_cpu(monkeypatch):
+    """Standard mode creates an HPA on CPU at 80% -- the wrong signal for a
+    GPU-bound engine. The manifest backend never autoscaled lane B; passing
+    replicas_max through silently added it. min == max keeps it inert."""
+    monkeypatch.setattr(backend, "BACKEND", "kserve")
+    dep_id = str(uuid.uuid4())
+    slug = f"hp{dep_id[:6]}"
+    ns = f"keel-inf-{slug}"
+    await k8s.load()
+    c = k8s.Cluster()
+    try:
+        for obj in ns_render.render(slug, 2):
+            await c.apply(obj)
+        for obj in backend.render(_spec(dep_id, slug, replicas_max=3)):
+            await c.apply(obj)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 90
+        hpas: list = []
+        while loop.time() < deadline:
+            hpas = (
+                await c._call(
+                    f"/apis/autoscaling/v2/namespaces/{ns}/horizontalpodautoscalers", "GET"
+                )
+            ).get("items", [])
+            if hpas:
+                break
+            await asyncio.sleep(3)
+        for h in hpas:
+            assert h["spec"]["minReplicas"] == h["spec"]["maxReplicas"], h["spec"]
+    finally:
+        await c.delete("Namespace", ns)
+        await c.close()
+
+
+@requires_kserve
+async def test_gpu_placement_survives_kserve(monkeypatch):
+    """Every other spike test uses gpu_count 0, so selector, toleration and the
+    GPU limit had never met a scheduler through KServe. Needs make fake-gpu."""
+    monkeypatch.setattr(backend, "BACKEND", "kserve")
+    await k8s.load()
+    c = k8s.Cluster()
+    gpu_node = os.environ.get("KEEL_GPU_NODE", "k3d-keel-gpu-0")
+    node = await c.get("Node", gpu_node)
+    if not node or not (node["status"].get("allocatable") or {}).get("nvidia.com/gpu"):
+        await c.close()
+        pytest.skip("no node advertising nvidia.com/gpu (make fake-gpu)")
+    dep_id = str(uuid.uuid4())
+    slug = f"gp{dep_id[:6]}"
+    ns = f"keel-inf-{slug}"
+    try:
+        for obj in ns_render.render(slug, 2):
+            await c.apply(obj)
+        for obj in backend.render(_spec(dep_id, slug, accelerator="l4", gpu_count=1)):
+            await c.apply(obj)
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 180
+        while loop.time() < deadline:
+            if classify(await c.pods_for(ns, dep_id)).phase is Phase.READY:
+                break
+            await asyncio.sleep(3)
+        else:
+            pytest.fail("GPU InferenceService never became ready")
+        pod = (await c.pods_for(ns, dep_id))[0]
+        assert pod["spec"]["nodeName"] == gpu_node
+        assert pod["spec"]["nodeSelector"] == {"keel.io/accelerator": "l4"}
+        assert pod["spec"]["containers"][0]["resources"]["limits"]["nvidia.com/gpu"] == "1"
+        quota = await c.get("ResourceQuota", "keel-quota", ns)
+        assert quota["status"]["used"]["requests.nvidia.com/gpu"] == "1"
     finally:
         await c.delete("Namespace", ns)
         await c.close()
