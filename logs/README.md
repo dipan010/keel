@@ -17,6 +17,7 @@ principle that quietly stops being true.
 | 8     | Teardown and telemetry            | `21e643b`, `a2d560d` |
 | 9     | Keys, identity, and CI            | `e3508d2`, `b399a25` |
 | 10    | A real run made possible, unrun   | `d5b81fb`..`a0f962a` |
+| 11    | KServe spike (branch)             | `spike/kserve` |
 
 Read them in order. Each stage assumes the one before it.
 

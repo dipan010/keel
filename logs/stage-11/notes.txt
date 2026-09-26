@@ -1,0 +1,105 @@
+================================================================================
+STAGE 11 -- THE KSERVE SPIKE  (branch spike/kserve, ADR-0008)
+================================================================================
+
+WHAT THIS STAGE PRODUCES
+    An answer to "does Keel sit cleanly on KServe?" -- graded against criteria
+    written before the spike began. Result: yes, all six pass, none by patching
+    KServe. The decision to adopt is still open.
+
+--------------------------------------------------------------------------------
+WHY THIS STAGE EXISTS
+--------------------------------------------------------------------------------
+    The very first plan called KServe "substrate, not competitor." Two pivots
+    later it was gone, and ADR-0002 compared writing an operator, Helm and
+    server-side apply -- but never ADOPTING an existing operator. Adopting the
+    expensive parts is the principle the whole design rests on, so the omission
+    had to be tested rather than argued.
+
+--------------------------------------------------------------------------------
+CONCEPT 1 -- CRITERIA BEFORE EVIDENCE
+--------------------------------------------------------------------------------
+    Six success criteria and four kill criteria went into ADR-0008 before any
+    KServe code existed. Two were singled out as "would pass locally and fail
+    for real" -- and both did fail on first contact, then passed after fixes.
+    A spike graded by whatever it produced would have called them fine.
+
+--------------------------------------------------------------------------------
+CONCEPT 2 -- DIVISION OF RECONCILIATION
+--------------------------------------------------------------------------------
+    KServe owns InferenceService -> Deployment/Service/pods.
+    Keel owns row -> InferenceService, and never inspects KServe's Deployment.
+
+    OBSERVED, not assumed:
+      - KServe reverted a manual edit to its Deployment's container args in
+        3s. Args, deliberately: an HPA can undo replicas, only the controller
+        rewrites the pod template.
+      - An edit to the InferenceService is applied by KServe and reported by
+        Keel as drift, with Keel writing nothing (I5).
+      - No false drift against KServe's webhook-defaulted fields.
+
+    IN THE CODE
+      control/render/kserve.py       row -> InferenceService
+      control/render/backend.py      the switch; upstream, teardown kinds,
+                                     ReconcileFailed fast-fail
+      control/reconciler/diff.py     compares whichever kind Keel owns
+      control/reconciler/main.py     lists the owned kind -- KServe's Deployment
+                                     also carries managed-by=keel, so listing
+                                     Deployments would compare the wrong object
+
+--------------------------------------------------------------------------------
+WHAT BROKE ON FIRST CONTACT
+--------------------------------------------------------------------------------
+ 1. v0.21.0's kserve.yaml references a `kserve` namespace it never creates.
+ 2. The default mode is Serverless (Knative); the raw mode is now `Standard`.
+ 3. disableIngressCreation defaults to false -- I1 would have broken while the
+    ClusterIP test stayed green. Now asserted directly: no Ingress, no route.
+ 4. KServe builds a hostname `{name}-predictor-{namespace}` EVEN WITH INGRESS
+    OFF, as one DNS label. Full-UUID names overflow 63 characters and KServe
+    refuses the resource. Fixed by splitting the domainTemplate -- keeping
+    ADR-0002's deterministic naming.
+ 5. RBAC: the provisioner's real ServiceAccount got "no" in a team namespace.
+    As admin everything worked. The stage-5 bug, exactly as predicted.
+ 6. The Service is `{name}-predictor` on port 80; the hardcoded `...:8000`
+    upstream would have routed to nothing. Now read from status.address.url.
+ 7. A rejected resource yields no pods, so the classifier would wait out the
+    30-minute timeout. Now fails in seconds on ReconcileFailed.
+ 8. v0.21.0 ships an LLMInferenceServiceConfig its own webhook rejects.
+    LLM-only, out of scope, reported by the install script.
+
+    Every setting is captured in deploy/kserve/install.sh, which is idempotent
+    -- the first version was not, because the Keel patch co-owns configmap
+    fields the release manifest also sets.
+
+--------------------------------------------------------------------------------
+RESULTS
+--------------------------------------------------------------------------------
+    KServe backend      200 passed, 3 skipped (manifest-internals tests, each
+                        with a KServe equivalent)
+    manifests backend   203 passed
+    footprint           peak 4.62 GiB of 7.65; zero evictions, zero OOM kills
+
+    The seam held, but wider than claimed: the status classifier needed no
+    change, while three Provisioner call sites depend on the backend.
+
+--------------------------------------------------------------------------------
+NOT VALIDATED
+--------------------------------------------------------------------------------
+    LLMInferenceService, llm-d, KV offloading, prefill/decode; mounted weights
+    (the renderer refuses rather than guesses); lane C scale-to-zero in
+    Standard mode; anything on a GPU.
+
+--------------------------------------------------------------------------------
+IF ACCEPTED
+--------------------------------------------------------------------------------
+    Delete the manifest renderer rather than keep both. And migrate: under
+    KServe the reconciler lists InferenceServices, so any raw Deployment left
+    by the manifest backend becomes a silent orphan. Free today, since nothing
+    is deployed for real; it only gets more expensive.
+
+--------------------------------------------------------------------------------
+VERIFY
+--------------------------------------------------------------------------------
+    ./deploy/kserve/install.sh
+    uv run pytest -q control/tests/test_kserve_spike.py
+    KEEL_RENDER_BACKEND=kserve make test
