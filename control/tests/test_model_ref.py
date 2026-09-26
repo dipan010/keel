@@ -97,3 +97,29 @@ def test_dtype_is_explicit_everywhere(path):
     if entry.get("mode") != "self_hosted":
         return
     assert (entry.get("engine_args") or {}).get("dtype"), f"{path.name} leaves dtype to auto"
+
+
+# ---------- runtime class ----------
+
+
+def test_no_runtime_class_is_named_unless_configured(monkeypatch):
+    """Naming a RuntimeClass that does not exist makes the pod unschedulable,
+    so this must stay unset by default -- every cluster without one, including
+    the local fake-GPU cluster, would otherwise break."""
+    monkeypatch.setattr(manifests, "RUNTIME_CLASS", "")
+    assert "runtimeClassName" not in container({**BASE, "weights_uri": None, "model_ref": "m"})
+
+
+def test_gpu_pods_opt_into_the_runtime_class_when_configured(monkeypatch):
+    """The device plugin advertising nvidia.com/gpu is not the same as a pod
+    being able to reach the GPU: on k3s the runtime is opt-in, and a pod that
+    does not name it starts, finds no CUDA device and dies."""
+    monkeypatch.setattr(manifests, "RUNTIME_CLASS", "nvidia")
+    spec = container({**BASE, "weights_uri": None, "model_ref": "m"})
+    assert spec["runtimeClassName"] == "nvidia"
+
+
+def test_cpu_pods_never_name_a_gpu_runtime_class(monkeypatch):
+    monkeypatch.setattr(manifests, "RUNTIME_CLASS", "nvidia")
+    cpu = {**BASE, "accelerator": "cpu", "gpu_count": 0, "weights_uri": None, "model_ref": "m"}
+    assert "runtimeClassName" not in container(cpu)

@@ -28,6 +28,17 @@ VLLM_PORT = 8000
 #: Weight loading is slow and that is not a fault: fail readiness during it
 #: and the pod restarts forever.
 READY_DELAY_SECONDS = int(os.environ.get("KEEL_READY_DELAY", "30"))
+#: On k3s the NVIDIA container runtime is exposed as a RuntimeClass that a
+#: pod must OPT INTO. Without it the pod schedules perfectly -- the device
+#: plugin advertises nvidia.com/gpu, the scheduler is satisfied -- and then
+#: vLLM starts, finds no CUDA device and dies, with a symptom that looks
+#: nothing like a scheduling problem.
+#:
+#: Unset by default because naming a RuntimeClass that does not exist makes
+#: the pod unschedulable, which would break every cluster without one --
+#: including the local fake-GPU cluster. deploy/gpu-node/setup.sh detects
+#: the class and tells you to set this.
+RUNTIME_CLASS = os.environ.get("KEEL_RUNTIME_CLASS", "")
 
 
 def labels(deployment_id: str, team: str) -> dict[str, str]:
@@ -53,6 +64,13 @@ def render(dep: dict[str, Any]) -> list[dict[str, Any]]:
     if lane is Lane.C:
         objects.append(_scaled_object(dep, name, ns, lb))
     return objects
+
+
+def _runtime_class(dep: dict[str, Any]) -> dict[str, Any]:
+    """Only for GPU pods, and only when a class is configured."""
+    if not dep.get("gpu_count") or not RUNTIME_CLASS:
+        return {}
+    return {"runtimeClassName": RUNTIME_CLASS}
 
 
 def _placement(dep: dict[str, Any]) -> dict[str, Any]:
@@ -118,6 +136,7 @@ def _deployment(dep: dict[str, Any], name: str, ns: str, lb: dict[str, str]) -> 
             "template": {
                 "metadata": {"labels": lb},
                 "spec": {
+                    **_runtime_class(dep),
                     **_placement(dep),
                     **_weights_fetcher(dep),
                     "containers": [

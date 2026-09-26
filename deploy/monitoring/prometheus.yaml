@@ -30,8 +30,21 @@ data:
             action: keep
             regex: dcgm-exporter
         metric_relabel_configs:
-          # DCGM labels samples with the consuming pod; map that to our id.
+          # DCGM labels each sample with the pod consuming the GPU. Whether that
+          # arrives as `pod` or `exported_pod` depends on whether it collides
+          # with a target label Prometheus already set -- and this has never
+          # been observed against a real exporter. Both are mapped so that
+          # whichever exists wins, rather than betting on one and silently
+          # attributing nothing.
+          #
+          # Pod names are vllm-<uuid>-<replicaset>-<suffix>; the uuid contains
+          # hyphens and the trailing two segments do not, so a non-greedy match
+          # recovers the id.
           - source_labels: [exported_pod]
+            regex: 'vllm-(.+?)-[a-z0-9]+-[a-z0-9]+'
+            target_label: deployment_id
+            replacement: '$1'
+          - source_labels: [pod]
             regex: 'vllm-(.+?)-[a-z0-9]+-[a-z0-9]+'
             target_label: deployment_id
             replacement: '$1'

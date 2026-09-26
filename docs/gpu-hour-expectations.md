@@ -30,7 +30,7 @@ Call it **$1–2**.
 
 ## 2 · Predictions, ranked by confidence
 
-### P1 — Very likely: the pod gets no GPU because nothing sets `runtimeClassName`
+### P1 — ~~Very likely~~ MITIGATED 2026-09-26: pod gets no GPU without `runtimeClassName`
 
 On k3s the NVIDIA container runtime is exposed as a **RuntimeClass that pods
 must opt into**. `control/render/manifests.py` does not set
@@ -44,6 +44,12 @@ expensive. Expect a CUDA error from inside vLLM, not a Pending pod.
 - **Right if:** the first lane-B deployment fails with a CUDA/no-device error.
 - **Wrong if:** it starts and serves. (Possible — some distributions set the
   nvidia runtime as the default rather than as an opt-in class.)
+- **Mitigated before the run.** `KEEL_RUNTIME_CLASS` now adds
+  `runtimeClassName` to GPU pods, unset by default because naming a class
+  that does not exist makes a pod unschedulable. `setup.sh` detects the
+  class and prints the export. **Still score it:** the prediction is now
+  whether the mitigation was needed, i.e. whether a `nvidia` RuntimeClass
+  turns up at all.
 
 ### P2 — Likely: DCGM utilisation does not attribute to a deployment
 
@@ -55,6 +61,9 @@ project.
 - **Right if:** `gpu_util_pct` stays NULL while DCGM metrics clearly exist in
   Prometheus.
 - **Wrong if:** the column populates on the first rollup.
+- **Partly mitigated.** Both `pod` and `exported_pod` are now mapped, so
+  whichever label DCGM actually produces wins. The regex itself is still
+  unverified against a real pod name.
 
 ### P3 — Possible: `setup.sh` configures a containerd that k3s ignores
 

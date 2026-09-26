@@ -83,11 +83,22 @@ if [ -z "${GOT:-}" ] || [ "$GOT" = "0" ]; then
   exit 1
 fi
 
+say "runtime class"
+# The device plugin advertising nvidia.com/gpu is NOT the same as a pod being
+# able to reach the GPU. On k3s the runtime is an opt-in RuntimeClass, and a
+# pod that does not name it starts, finds no CUDA device and dies -- with a
+# symptom that looks nothing like a scheduling problem.
+RTC=$(k3s kubectl get runtimeclass -o jsonpath='{.items[*].metadata.name}' 2>/dev/null || true)
+echo "runtime classes on this cluster: ${RTC:-<none>}"
+NVIDIA_RTC=""
+for c in $RTC; do case "$c" in nvidia*) NVIDIA_RTC="$c"; break;; esac; done
+
 say "done"
 cat <<NOTE
-Node:         $NODE
-Accelerator:  $ACCELERATOR   (catalog entries must match this label)
-Compute cap:  $CAP
+Node:          $NODE
+Accelerator:   $ACCELERATOR   (catalog entries must match this label)
+Compute cap:   $CAP
+RuntimeClass:  ${NVIDIA_RTC:-<none found>}
 
 Copy the kubeconfig to wherever Keel runs, replacing 127.0.0.1 with this
 machine's reachable address:
@@ -96,6 +107,13 @@ machine's reachable address:
   sed -i '' "s/127.0.0.1/<this-box>/" ./gpu.kubeconfig
   export KUBECONFIG=\$PWD/gpu.kubeconfig
 
+$( [ -n "$NVIDIA_RTC" ] && echo "EXPORT THIS before running the provisioner, or pods will start
+without a GPU and vLLM will die with a CUDA error:
+
+  export KEEL_RUNTIME_CLASS=$NVIDIA_RTC
+" || echo "No nvidia RuntimeClass found. If vLLM reports no CUDA device, this is
+why -- check: k3s kubectl get runtimeclass
+" )
 Then do the MANUAL baseline first -- see docs/baseline.md. Once Keel has run,
 the image and weights are cached and a clean cold number is gone.
 NOTE
