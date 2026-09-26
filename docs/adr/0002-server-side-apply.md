@@ -28,3 +28,17 @@ the queue can redeliver safely.
 
 Teams want to declare deployments in their own GitOps repos, at which point a
 CRD becomes the natural interface and the Control API becomes a second writer.
+
+## Amended 2026-09-27 — an option this ADR never weighed
+
+The three options above were: write a CRD and operator, use Helm, or
+server-side apply. The rejection of the first rests on *writing* an operator
+and owning two reconcile loops that can disagree.
+
+**Adopting an existing operator was never considered**, and that objection does
+not hold with the same force when the operator is someone else's, mature and
+maintained — adopting the expensive parts is the principle the whole design
+rests on. KServe is that operator. ADR-0008 evaluates it.
+
+Server-side apply remains how Keel writes whatever `render/` produces; the open
+question is only what `render/` should produce.
