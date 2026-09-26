@@ -71,9 +71,12 @@ def render(dep: dict[str, Any]) -> list[dict[str, Any]]:
         )
     model = dep.get("model_ref")
     args = [
-        "--model", str(model),
-        "--served-model-name", served_model_name(dep),
-        "--port", str(VLLM_PORT),
+        "--model",
+        str(model),
+        "--served-model-name",
+        served_model_name(dep),
+        "--port",
+        str(VLLM_PORT),
     ]
     for flag, value in (dep.get("engine_args") or {}).items():
         args += [f"--{flag}", str(value)]
@@ -104,8 +107,10 @@ def render(dep: dict[str, Any]) -> list[dict[str, Any]]:
     # scaling on CPU at 80% -- the wrong signal for a GPU-bound engine, adding
     # GPU replicas because the tokenizer got busy. min == max makes that HPA
     # inert until autoscaling is a deliberate decision on a real signal.
-    replicas_max = replicas_min if Lane(dep["lane"]) is Lane.B else max(
-        dep.get("replicas_max") or 1, replicas_min, 1
+    replicas_max = (
+        replicas_min
+        if Lane(dep["lane"]) is Lane.B
+        else max(dep.get("replicas_max") or 1, replicas_min, 1)
     )
 
     predictor: dict[str, Any] = {
