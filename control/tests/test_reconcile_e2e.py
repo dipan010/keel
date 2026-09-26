@@ -27,6 +27,11 @@ from control.tests.test_provision_e2e import requires_cluster
 
 pytestmark = [requires_db, requires_cluster]
 
+manifest_only = pytest.mark.skipif(
+    os.environ.get("KEEL_RENDER_BACKEND") == "kserve",
+    reason="asserts manifest-backend internals; KServe equivalent in test_kserve_spike.py",
+)
+
 CPU_MODEL = "fake-recon-test"
 
 
@@ -105,6 +110,7 @@ async def test_missing_workload_is_detected_and_requeued(catalog_entry, team):
         await cluster.close()
 
 
+@manifest_only
 async def test_manual_scale_is_detected_as_drift(catalog_entry, team):
     """Someone runs kubectl scale during an incident and never mentions it."""
     dep_id, spec = await _seed(team)
@@ -153,6 +159,7 @@ async def test_manual_scale_is_detected_as_drift(catalog_entry, team):
         await cluster.close()
 
 
+@manifest_only
 async def test_orphans_are_reported_and_survive(catalog_entry, team):
     """Labelled ours, no row. Alert, never delete -- invariant I5."""
     await k8s.load()

@@ -18,7 +18,7 @@ from control import db, gateway, k8s, repo
 from control.domain.rules import namespace
 from control.domain.states import Lane, Mode, Status
 from control.provisioner.status import Phase, classify, classify_log
-from control.render import manifests
+from control.render import backend, manifests
 from control.render import namespace as ns_render
 
 log = structlog.get_logger()
@@ -81,6 +81,9 @@ async def _wait_for_ready(cluster: k8s.Cluster, dep: dict, started: float) -> No
                 {"namespace": ns},
             )
 
+        if rejected := await backend.reconcile_failure(cluster, dep, ns):
+            raise Failed(rejected[0], rejected[1], {"namespace": ns})
+
         pods = await cluster.pods_for(ns, str(dep["id"]))
         outcome = classify(pods, elapsed_seconds=elapsed)
 
@@ -137,7 +140,7 @@ async def provision(cluster: k8s.Cluster, gw: gateway.Gateway, deployment_id: st
         assert spec.get("model_ref") or spec.get("weights_uri"), (
             f"catalog entry {dep['model_id']} has neither model_ref nor weights_uri"
         )
-        for obj in manifests.render(spec):
+        for obj in backend.render(spec):
             await cluster.apply(obj)
         log.info("provision.applied", id=dep_id, namespace=ns)
 
@@ -150,7 +153,7 @@ async def provision(cluster: k8s.Cluster, gw: gateway.Gateway, deployment_id: st
             # 06/07/08 -- scheduling, loading, ready
             await _wait_for_ready(cluster, {**dep, "status": Status.SCHEDULING}, started)
 
-        upstream = f"http://{dep['k8s_object_name']}.{ns}.svc.cluster.local:8000"
+        upstream = await backend.upstream(cluster, dep, ns)
         model = manifests.served_model_name(dep)
     else:
         upstream, model = "", dep["upstream_model"]
@@ -208,7 +211,7 @@ async def teardown(cluster: k8s.Cluster, gw: gateway.Gateway, deployment_id: str
         # error, an unreachable API server -- must surface, so the job is
         # retried rather than the deployment being marked deleted while its
         # workload keeps running and billing.
-        for kind in ("ScaledObject", "Service", "Deployment"):
+        for kind in backend.teardown_kinds():
             await cluster.delete(kind, dep["k8s_object_name"], ns)
     await _transition(str(dep["id"]), Status.DELETING, Status.DELETED)
 

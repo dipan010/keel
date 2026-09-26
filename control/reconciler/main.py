@@ -20,7 +20,7 @@ from control import db, k8s, repo
 from control.domain.rules import namespace
 from control.domain.states import Mode, Status
 from control.reconciler.diff import RECONCILABLE, Assessment, assess, orphans
-from control.render import manifests
+from control.render import backend
 
 log = structlog.get_logger()
 
@@ -53,7 +53,7 @@ select d.*, t.slug as team_slug, c.weights_uri, c.model_ref,
 
 
 def _rendered(row: dict[str, Any]) -> dict | None:
-    """The Deployment we would produce for this row right now."""
+    """The workload object we would produce for this row right now."""
     if Mode(row["mode"]) is not Mode.SELF_HOSTED:
         return None
     spec = {
@@ -61,8 +61,8 @@ def _rendered(row: dict[str, Any]) -> dict | None:
         "id": str(row["id"]),
         "engine_args": row["engine_args"] or row["catalog_engine_args"] or {},
     }
-    for obj in manifests.render(spec):
-        if obj["kind"] == "Deployment":
+    for obj in backend.render(spec):
+        if obj["kind"] == backend.workload_kind():
             return obj
     return None
 
@@ -110,13 +110,22 @@ async def reconcile_once(cluster: k8s.Cluster) -> dict[str, int]:
         cur = await conn.execute(DESIRED)
         desired = await cur.fetchall()
 
+    # List the kind Keel owns. Under KServe that matters: the Deployment KServe
+    # generates also carries managed-by=keel -- label propagation, which the
+    # metrics depend on -- so listing Deployments would compare KServe's object
+    # against a rendered InferenceService and report drift forever.
+    kind = backend.workload_kind()
+    group, version, plural = k8s.RESOURCES[kind]
+    base = f"/apis/{group}/{version}" if group else f"/api/{version}"
     live = await cluster._call(
-        "/apis/apps/v1/deployments",
+        f"{base}/{plural}",
         "GET",
         query=[("labelSelector", "app.kubernetes.io/managed-by=keel")],
     )
     by_id: dict[str, dict] = {}
     for obj in live.get("items", []):
+        # List responses omit kind on each item; the comparison needs it.
+        obj.setdefault("kind", kind)
         if dep_id := (obj["metadata"].get("labels") or {}).get("keel.io/deployment-id"):
             by_id[dep_id] = obj
 

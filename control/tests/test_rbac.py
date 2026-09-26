@@ -133,3 +133,44 @@ async def test_control_api_has_no_cluster_access_whatsoever(cluster, verb, resou
     """The API records intent and enqueues. It never touches the cluster, and
     the absence of a RoleBinding is what keeps that true."""
     assert not await _can(cluster, "keel-api", verb, resource, group)
+
+
+# ---------- ADR-0008 spike: InferenceServices ----------
+#
+# SubjectAccessReview checks RBAC rules, not whether the CRD is installed, so
+# these hold on any cluster with deploy/rbac.yaml applied -- including CI's.
+
+
+async def test_provisioner_can_create_inferenceservices_in_team_namespaces(cluster, team_ns):
+    """Before this grant, the real provisioner identity got `no` here. Running
+    as admin locally would have hidden it -- the stage-5 bug again -- and the
+    first real deploy would have failed for every team."""
+    assert await _can(
+        cluster,
+        "keel-provisioner",
+        "create",
+        "inferenceservices",
+        "serving.kserve.io",
+        namespace=team_ns,
+    )
+
+
+@pytest.mark.parametrize("namespace", ["keel-system", "keel-gateway", "default", None])
+async def test_provisioner_cannot_create_inferenceservices_elsewhere(cluster, namespace):
+    """I4: nothing is created outside keel-inf-*. None means cluster-wide."""
+    assert not await _can(
+        cluster,
+        "keel-provisioner",
+        "create",
+        "inferenceservices",
+        "serving.kserve.io",
+        namespace=namespace,
+    )
+
+
+async def test_reconciler_can_see_inferenceservices_but_not_touch_them(cluster):
+    """I5: read-only by construction, now over the object it compares."""
+    grp = "serving.kserve.io"
+    assert await _can(cluster, "keel-reconciler", "list", "inferenceservices", grp)
+    for verb in ("delete", "patch", "create", "update"):
+        assert not await _can(cluster, "keel-reconciler", verb, "inferenceservices", grp)

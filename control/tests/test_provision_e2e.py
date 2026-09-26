@@ -55,6 +55,11 @@ requires_cluster = pytest.mark.skipif(
 
 pytestmark = requires_cluster
 
+manifest_only = pytest.mark.skipif(
+    os.environ.get("KEEL_RENDER_BACKEND") == "kserve",
+    reason="asserts manifest-backend internals; KServe equivalent in test_kserve_spike.py",
+)
+
 
 @pytest.fixture
 def spec():
@@ -163,6 +168,7 @@ async def test_networkpolicy_and_quota_are_applied(spec):
         await c.close()
 
 
+@manifest_only
 async def test_teardown_removes_the_workload(spec):
     """The delete handler, which had never run before this stage.
 

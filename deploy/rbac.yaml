@@ -37,6 +37,9 @@ rules:
   - apiGroups: [keda.sh]
     resources: [scaledobjects]
     verbs: [get, list, watch]
+  - apiGroups: [serving.kserve.io]
+    resources: [inferenceservices]
+    verbs: [get, list, watch]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -63,6 +66,14 @@ rules:
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [keda.sh]
     resources: [scaledobjects]
+    verbs: [get, list, watch, create, update, patch, delete]
+  # ADR-0008 spike. Granted through this ClusterRole, but it only takes effect
+  # via the per-namespace RoleBinding created at team onboarding -- so the
+  # provisioner can create InferenceServices inside keel-inf-* and nowhere
+  # else. Asserted against a live authorizer in test_rbac.py, because running
+  # as admin hid exactly this class of gap in stage 5.
+  - apiGroups: [serving.kserve.io]
+    resources: [inferenceservices]
     verbs: [get, list, watch, create, update, patch, delete]
   - apiGroups: [networking.k8s.io]
     resources: [networkpolicies]

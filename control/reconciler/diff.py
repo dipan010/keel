@@ -36,10 +36,40 @@ class Assessment:
     detail: dict[str, Any] = field(default_factory=dict)
 
 
+def _pod_spec(obj: dict) -> dict:
+    """The pod-level fields, wherever the object keeps them.
+
+    An InferenceService holds them directly on its predictor; a Deployment in
+    its pod template. Keel compares whichever object it owns -- for KServe that
+    is the InferenceService, never the Deployment KServe generates (ADR-0008).
+    """
+    if obj.get("kind") == "InferenceService":
+        return obj["spec"]["predictor"]
+    return obj["spec"]["template"]["spec"]
+
+
+def _spec_replicas(obj: dict) -> int:
+    if obj.get("kind") == "InferenceService":
+        return obj["spec"]["predictor"].get("minReplicas") or 0
+    return obj["spec"].get("replicas") or 0
+
+
+def _ready_replicas(obj: dict) -> int:
+    """KServe does not report a ready count on the InferenceService in Standard
+    mode; its Ready condition is the signal it offers. Treated as all-or-none,
+    which is coarser than a Deployment's count -- a known limitation of the
+    spike, not a claim of equivalence."""
+    if obj.get("kind") == "InferenceService":
+        conds = (obj.get("status") or {}).get("conditions") or []
+        ready = any(c.get("type") == "Ready" and c.get("status") == "True" for c in conds)
+        return _spec_replicas(obj) or 1 if ready else 0
+    return (obj.get("status") or {}).get("readyReplicas") or 0
+
+
 def _container(obj: dict) -> dict:
-    containers = obj["spec"]["template"]["spec"].get("containers") or []
+    containers = _pod_spec(obj).get("containers") or []
     for c in containers:
-        if c.get("name") == "vllm":
+        if c.get("name") in ("vllm", "kserve-container"):
             return c
     return containers[0] if containers else {}
 
@@ -52,7 +82,7 @@ def material(obj: dict, *, compare_replicas: bool = True) -> dict[str, Any]:
     policies, empty resource maps) that we never set, so a naive diff reports
     drift on every pass, forever.
     """
-    pod = obj["spec"]["template"]["spec"]
+    pod = _pod_spec(obj)
     c = _container(obj)
     out: dict[str, Any] = {
         "image": c.get("image"),
@@ -61,7 +91,7 @@ def material(obj: dict, *, compare_replicas: bool = True) -> dict[str, Any]:
         "nodeSelector": tuple(sorted((pod.get("nodeSelector") or {}).items())),
     }
     if compare_replicas:
-        out["replicas"] = obj["spec"].get("replicas")
+        out["replicas"] = _spec_replicas(obj)
     return out
 
 
@@ -95,8 +125,8 @@ def assess(row: dict[str, Any], live: dict | None, rendered: dict | None) -> Ass
             alert=True,
         )
 
-    spec_replicas = live["spec"].get("replicas") or 0
-    ready_replicas = (live.get("status") or {}).get("readyReplicas") or 0
+    spec_replicas = _spec_replicas(live)
+    ready_replicas = _ready_replicas(live)
 
     if ready_replicas == 0:
         if lane is Lane.C and spec_replicas == 0:
