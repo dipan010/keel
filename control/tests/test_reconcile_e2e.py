@@ -65,6 +65,7 @@ async def _seed(team: str, status: str = "ready") -> tuple[str, dict]:
     spec = {
         "id": dep_id,
         "team_slug": team,
+        "model_id": CPU_MODEL,
         "lane": "b",
         "replicas_min": 1,
         "replicas_max": 1,
@@ -164,6 +165,7 @@ async def test_orphans_are_reported_and_survive(catalog_entry, team):
         spec = {
             "id": ghost,
             "team_slug": team,
+            "model_id": CPU_MODEL,
             "lane": "b",
             "replicas_min": 1,
             "replicas_max": 1,

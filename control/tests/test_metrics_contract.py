@@ -20,6 +20,7 @@ OBSERVED = set(json.loads(RESULTS.read_text())["metric_names"])
 SPEC = {
     "id": "d-1",
     "team_slug": "t",
+    "model_id": "fake-model",
     "lane": "c",
     "replicas_min": 0,
     "replicas_max": 3,

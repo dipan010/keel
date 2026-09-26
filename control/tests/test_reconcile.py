@@ -9,6 +9,7 @@ from control.render import manifests
 BASE = {
     "id": "d-1",
     "team_slug": "t",
+    "model_id": "fake-model",
     "lane": "b",
     "mode": "self_hosted",
     "replicas_min": 1,

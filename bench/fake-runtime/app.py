@@ -17,7 +17,7 @@ import random
 import time
 
 from fastapi import FastAPI
-from fastapi.responses import PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse
 
 app = FastAPI()
 
@@ -58,6 +58,19 @@ def models():
 
 @app.post("/v1/chat/completions")
 def chat(body: dict):
+    # vLLM rejects a model name it is not serving. So must the fake, or it
+    # hides exactly the mismatch it exists to catch.
+    requested = body.get("model")
+    if requested != MODEL:
+        return JSONResponse(
+            status_code=404,
+            content={
+                "object": "error",
+                "message": f"The model `{requested}` does not exist.",
+                "type": "NotFoundError",
+                "code": 404,
+            },
+        )
     global _requests, _prompt_tokens, _generation_tokens
     global _prompt_tokens_cached, _prefix_queries, _prefix_hits
     _requests += 1

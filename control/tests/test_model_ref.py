@@ -21,6 +21,7 @@ CATALOG = pathlib.Path(__file__).resolve().parents[2] / "catalog"
 BASE = {
     "id": "d1",
     "team_slug": "t",
+    "model_id": "fake-model",
     "lane": "b",
     "replicas_min": 1,
     "replicas_max": 1,
@@ -123,3 +124,38 @@ def test_cpu_pods_never_name_a_gpu_runtime_class(monkeypatch):
     monkeypatch.setattr(manifests, "RUNTIME_CLASS", "nvidia")
     cpu = {**BASE, "accelerator": "cpu", "gpu_count": 0, "weights_uri": None, "model_ref": "m"}
     assert "runtimeClassName" not in container(cpu)
+
+
+# ---------- served model name ----------
+
+
+def test_vllm_is_told_the_name_the_gateway_will_send():
+    """After model_ref landed, vLLM served "Qwen/Qwen2.5-0.5B-Instruct" while
+    the gateway was registered with "/models/weights". A real vLLM rejects every
+    request whose model it is not serving; the fake accepted any name, so the
+    mismatch was invisible until this test existed."""
+    spec = {**BASE, "weights_uri": None, "model_ref": "Qwen/Qwen2.5-0.5B-Instruct"}
+    args = container(spec)["containers"][0]["args"]
+    assert "--served-model-name" in args
+    served = args[args.index("--served-model-name") + 1]
+    assert served == manifests.served_model_name(spec)
+
+
+def test_the_served_name_does_not_depend_on_where_the_weights_came_from():
+    """--model changes between a HuggingFace id and a mount path; the name
+    clients reach it by must not."""
+    hf = {**BASE, "weights_uri": None, "model_ref": "Qwen/Qwen2.5-0.5B-Instruct"}
+    cached = {**hf, "weights_uri": "s3://keel/qwen"}
+    assert manifests.served_model_name(hf) == manifests.served_model_name(cached)
+
+
+def test_the_provisioner_registers_the_served_name():
+    """Guard against the two sides drifting apart again: the registration must
+    call the same function, not rebuild the string."""
+    import inspect
+
+    from control.provisioner import main as provisioner
+
+    src = inspect.getsource(provisioner.provision)
+    assert "served_model_name(" in src
+    assert "/models/weights" not in src

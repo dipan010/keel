@@ -72,6 +72,18 @@ def render(dep: dict[str, Any]) -> list[dict[str, Any]]:
     return objects
 
 
+def served_model_name(dep: dict[str, Any]) -> str:
+    """The name vLLM answers to, and the name the gateway must send.
+
+    One function for both, so they cannot drift apart. They did: after
+    model_ref landed, vLLM served "Qwen/Qwen2.5-0.5B-Instruct" while the
+    gateway was registered with "/models/weights", and a real vLLM would have
+    rejected every request. The fake runtime accepted any name, so nothing
+    noticed.
+    """
+    return str(dep["model_id"])
+
+
 def _runtime_class(dep: dict[str, Any]) -> dict[str, Any]:
     """Only for GPU pods, and only when a class is configured."""
     if not dep.get("gpu_count") or not RUNTIME_CLASS:
@@ -127,7 +139,17 @@ def _deployment(dep: dict[str, Any], name: str, ns: str, lb: dict[str, str]) -> 
     # itself. Hardcoding the mount path meant a deployment without a fetcher
     # pointed at an empty directory.
     model = "/models/weights" if dep.get("weights_uri") else dep.get("model_ref")
-    args = ["--model", str(model), "--port", str(VLLM_PORT)]
+    args = [
+        "--model",
+        str(model),
+        # Without this vLLM serves under whatever --model was: a HuggingFace id
+        # or a mount path. The gateway must send exactly that string, so it is
+        # fixed here and read back by the Provisioner from the same function.
+        "--served-model-name",
+        served_model_name(dep),
+        "--port",
+        str(VLLM_PORT),
+    ]
     for flag, value in (dep.get("engine_args") or {}).items():
         args += [f"--{flag}", str(value)]
 

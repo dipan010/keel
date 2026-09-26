@@ -151,7 +151,7 @@ async def provision(cluster: k8s.Cluster, gw: gateway.Gateway, deployment_id: st
             await _wait_for_ready(cluster, {**dep, "status": Status.SCHEDULING}, started)
 
         upstream = f"http://{dep['k8s_object_name']}.{ns}.svc.cluster.local:8000"
-        model = "/models/weights"
+        model = manifests.served_model_name(dep)
     else:
         upstream, model = "", dep["upstream_model"]
 

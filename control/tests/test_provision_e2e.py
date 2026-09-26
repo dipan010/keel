@@ -62,6 +62,7 @@ def spec():
     return {
         "id": dep_id,
         "team_slug": f"e2e{dep_id[:6]}",
+        "model_id": "fake-model",
         "lane": "b",
         "replicas_min": 1,
         "replicas_max": 1,
