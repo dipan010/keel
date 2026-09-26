@@ -1,0 +1,91 @@
+================================================================================
+STAGE 10 -- MAKING A REAL RUN POSSIBLE, WITHOUT ONE
+================================================================================
+
+WHAT THIS STAGE PRODUCES
+    No new capability. Instead, a run on real hardware stops being guaranteed to
+    fail. Every item here was a way the first real vLLM would have broken, found
+    before anyone paid for the hardware to discover it.
+
+--------------------------------------------------------------------------------
+THE THEME: A FAKE LAXER THAN THE REAL THING TESTS NOTHING
+--------------------------------------------------------------------------------
+    Four times now the fake runtime or a fake gateway was more permissive than
+    the real system, and each time it hid a real bug:
+
+      stage 8   fake emitted metric names that do not exist, no histograms
+      stage 9   fake gateway's "token" embedded the secret it stood for
+      stage 10  fake emitted no prefix-cache series (rollup untestable)
+      stage 10  fake answered to ANY model name (hid a total outage)
+
+    The response is not vigilance but tests that pin the fake to the real
+    interface: test_metrics_contract checks the fake emits every series the
+    rollup queries; test_fake_runtime checks it rejects names vLLM would.
+
+--------------------------------------------------------------------------------
+1 -- A REAL MODEL COULD NOT HAVE STARTED  (migration 0006)
+--------------------------------------------------------------------------------
+    render hardcoded "--model /models/weights", while every catalog entry set
+    weights_uri, so the fetch-weights init container was always rendered --
+    pointing at keel/weights-fetcher:dev, an image never built.
+
+    model_ref now says what vLLM loads: a HuggingFace id (vLLM fetches it) or,
+    with weights_uri set, the mount path. Both catalog entries pull from
+    HuggingFace, one fewer moving part for a first real run.
+
+--------------------------------------------------------------------------------
+2 -- THE GATEWAY AND vLLM DISAGREED ON THE MODEL'S NAME
+--------------------------------------------------------------------------------
+    After model_ref, vLLM served "Qwen/Qwen2.5-0.5B-Instruct" while the gateway
+    was registered with "/models/weights". A real vLLM rejects any name it is
+    not serving: every request would have failed.
+
+    IN THE CODE
+      control/render/manifests.py   served_model_name() -- one function
+      control/provisioner/main.py   registers the result of that same function
+    --served-model-name is now always passed, so the name clients use no longer
+    depends on where the weights came from.
+
+--------------------------------------------------------------------------------
+3 -- THE DEPLOYED vLLM WAS NOT THE VERIFIED vLLM
+--------------------------------------------------------------------------------
+    Keel deployed v0.11.0 (a stage-1 guess) while every metric name and log
+    signature was verified against 0.28.0. VLLM_VERSION is now the single
+    source; test_version_pin fails if the image, the probe notebook and the
+    recorded results disagree. The notebook had been installing unpinned.
+
+--------------------------------------------------------------------------------
+4 -- PREFIX CACHE  (migration 0007)
+--------------------------------------------------------------------------------
+    tokens_in counted cached and computed prompt tokens alike. Measured on the
+    fake with a warm prefix: 89 prompt tokens, 50 served from cache. Added
+    tokens_in_cached and prefix_cache_hit_pct -- two columns because a hit
+    covers a block, not a token. NULL, not 0, when unobserved.
+
+    Still unconfirmed: whether vLLM's prefix caching is on by default. Assumed
+    "almost certainly"; never checked.
+
+--------------------------------------------------------------------------------
+5 -- THE GPU HOUR AS A RUNBOOK
+--------------------------------------------------------------------------------
+    deploy/gpu-node/setup.sh      k3s, NVIDIA toolkit, device plugin, label,
+                                  taint; refuses to finish unless nvidia.com/gpu
+                                  is genuinely allocatable; detects the
+                                  accelerator from the card (it used to default
+                                  to l4); detects the NVIDIA RuntimeClass
+    docs/baseline.md              a procedure, manual run FIRST
+    docs/gpu-hour-expectations.md five falsifiable predictions, written before
+                                  the run, with a scoring table
+    deploy/monitoring/dcgm.yaml   real gpu_util_pct, NULL where absent
+
+    KEEL_RUNTIME_CLASS: on k3s the NVIDIA runtime is opt-in. A GPU pod without
+    runtimeClassName schedules perfectly and then finds no CUDA device.
+
+    Status: no paid run is planned. Nothing is blocked on it.
+
+--------------------------------------------------------------------------------
+VERIFY
+--------------------------------------------------------------------------------
+    make test-unit        includes test_version_pin, test_fake_runtime,
+                          test_model_ref
+    make ci
