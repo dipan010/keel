@@ -107,6 +107,73 @@ Only real hardware can answer these, and all three are still open:
   Colab's disk and network. If a real L4 differs sharply, the estimator's
   eventual model has to account for the environment, not just the accelerator.
 
+## 5 · Streaming, and what the gateway costs per request (~2 min)
+
+Everything above times how long it takes to get an endpoint. This times what
+a request costs once you have one, and checks something nothing has tested:
+the fake runtime does not stream, so whether a Keel endpoint streams is
+unknown. Every chat UI asks for `stream: true`.
+
+Do it after the Keel run, with the deployment `ready`. Send the same streamed
+request straight to vLLM, then through the gateway:
+
+```bash
+NS=keel-inf-platform
+SVC=$(kubectl get svc -n $NS -o name | head -1)
+kubectl port-forward -n $NS $SVC 8000:8000 &
+kubectl port-forward -n keel-gateway svc/litellm 4000:4000 &
+DEP_ID=...    # from the POST in step 2
+KEY=$(curl -s -X POST localhost:8080/v1/deployments/$DEP_ID/keys \
+  -H 'Content-Type: application/json' -d '{}' | jq -r .key)
+
+cat > /tmp/stream.py <<'EOF'
+# usage: stream.py URL MODEL [KEY]. Prints time to first token, total, chunks.
+import json, sys, time, urllib.request
+url, model, key = sys.argv[1], sys.argv[2], (sys.argv[3:] or [None])[0]
+body = {"model": model, "stream": True, "max_tokens": 64,
+        "messages": [{"role": "user", "content": "Count from 1 to 20."}]}
+req = urllib.request.Request(url + "/v1/chat/completions", json.dumps(body).encode(),
+                             {"Content-Type": "application/json"})
+if key:
+    req.add_header("Authorization", "Bearer " + key)
+t0, ttft, chunks = time.monotonic(), None, 0
+with urllib.request.urlopen(req) as r:
+    for line in r:
+        line = line.strip()
+        if not line.startswith(b"data:") or line == b"data: [DONE]":
+            continue
+        chunks += 1
+        delta = json.loads(line[5:])["choices"][0].get("delta", {})
+        if ttft is None and delta.get("content"):
+            ttft = time.monotonic() - t0
+print(f"ttft {ttft:.3f}s  total {time.monotonic() - t0:.3f}s  chunks {chunks}")
+EOF
+
+for i in 1 2 3 4 5 6; do python3 /tmp/stream.py http://localhost:8000 Qwen/Qwen2.5-7B-Instruct; done
+for i in 1 2 3 4 5 6; do python3 /tmp/stream.py http://localhost:4000 platform/bench $KEY; done
+```
+
+Direct calls use the HuggingFace id because that is the name vLLM serves; the
+gateway takes the route name. Throw away the first call of each set as warm-up
+and take the median of the other five.
+
+The script times the first chunk that carries text, not the first byte:
+servers send response headers, and often an empty role chunk, before the
+model has produced anything, so `curl`'s `time_starttransfer` would time the
+headers.
+
+**Streaming works** if the gateway run shows many chunks (roughly one per
+token, not 1–2) and `ttft` well below `total`. If `ttft` ≈ `total`, something
+in the path is buffering the whole reply.
+
+**Gateway overhead** is the gateway's median `ttft` minus vLLM's.
+
+| | TTFT (median) | Total (median) | Chunks |
+|---|---|---|---|
+| vLLM direct | | | |
+| Through the gateway | | | |
+| **Gateway overhead** | | | |
+
 ## Before you start
 
 Read `docs/gpu-hour-expectations.md`. It records what is expected to break,
