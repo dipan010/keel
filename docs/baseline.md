@@ -60,12 +60,41 @@ Then delete it, clear the image and weight caches, and do it again warm.
 
 ## 2 · The Keel run
 
+Set up before the stopwatch starts. The database runs on your laptop; only
+the cluster is on the box.
+
 ```bash
 export KUBECONFIG=$PWD/gpu.kubeconfig
-make rbac monitoring gateway
+docker start keel-db || make db      # then wait a few seconds for Postgres
+make migrate      # skip on an existing keel-db: it re-runs every file
 make catalog seed
-make provisioner &          # in another shell
+make rbac monitoring gateway
+make gateway-fwd &                   # LiteLLM on localhost:4000
+```
 
+Start the two services, each in its own shell with the same `KUBECONFIG`.
+The provisioner needs the gateway variables: **without them it falls back to
+a no-gateway mode** (`control/gateway.py`). It registers no route and the
+smoke test can't go through the gateway. It also needs the runtime class that
+`setup.sh` printed (P1 in the expectations doc):
+
+```bash
+# in both shells (the API calls the gateway too, to issue keys)
+export KUBECONFIG=$PWD/gpu.kubeconfig
+export KEEL_GATEWAY_URL=http://localhost:4000
+export KEEL_GATEWAY_KEY=sk-keel-dev-master   # from deploy/gateway/litellm.yaml
+
+# shell 1
+make api                                     # :8080; the target sets KEEL_DEV_AUTH=1
+
+# shell 2
+export KEEL_RUNTIME_CLASS=nvidia             # whatever setup.sh printed
+make provisioner
+```
+
+Start the stopwatch and ask for the model:
+
+```bash
 curl -X POST localhost:8080/v1/deployments \
   -H "Idempotency-Key: $(uuidgen)" -H 'Content-Type: application/json' \
   -d '{"team":"platform","name":"bench","model":"qwen2.5-7b-instruct","allow_preview":true}'
